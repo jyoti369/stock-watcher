@@ -16,7 +16,7 @@ import streamlit as st
 # BEFORE importing src.config so it picks them up. No-op locally / if unset.
 try:
     for _k in ["STOCKWATCH_TG_TOKEN", "STOCKWATCH_TG_CHAT", "STOCKWATCH_SMTP_USER",
-               "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO"]:
+               "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO", "STOCKWATCH_APP_PASSWORD"]:
         if _k in st.secrets:
             os.environ[_k] = str(st.secrets[_k])
 except Exception:
@@ -26,6 +26,25 @@ from src import (alerts, analysis, bearcase, datasource, db, projection,
                  repo_state, sectors, suggestions, watcher)
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
+
+
+def _require_password() -> None:
+    """Gate the app behind STOCKWATCH_APP_PASSWORD when it's set (e.g. on a public
+    Streamlit Cloud URL). No password set = no gate, so local use is unaffected."""
+    pw = os.environ.get("STOCKWATCH_APP_PASSWORD", "")
+    if not pw or st.session_state.get("_authed"):
+        return
+    st.markdown("### 🔒 Stock Watcher")
+    entered = st.text_input("Password", type="password")
+    if entered == pw:
+        st.session_state["_authed"] = True
+        st.rerun()
+    elif entered:
+        st.error("Wrong password")
+    st.stop()
+
+
+_require_password()
 db.init_db()
 
 # fresh cloud container has an empty db — seed watchlist/rules from committed state
