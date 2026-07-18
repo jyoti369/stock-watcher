@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job that runs the alert watcher every 15 minutes.
+
+  1. Edit the two ABSOLUTE paths below if your project lives elsewhere.
+  2. Copy into place and load:
+       cp scripts/com.stockwatcher.plist ~/Library/LaunchAgents/
+       launchctl load  ~/Library/LaunchAgents/com.stockwatcher.plist
+  3. To stop:
+       launchctl unload ~/Library/LaunchAgents/com.stockwatcher.plist
+
+  Logs go to data/watcher.log. Runs only fire market-hours-agnostic every 15 min;
+  the cooldown in config.yaml stops alert spam.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stockwatcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/debojyoti.mandal/Code/Personal/stock-watcher/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.watcher</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/debojyoti.mandal/Code/Personal/stock-watcher</string>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/debojyoti.mandal/Code/Personal/stock-watcher/data/watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/debojyoti.mandal/Code/Personal/stock-watcher/data/watcher.log</string>
+</dict>
+</plist>

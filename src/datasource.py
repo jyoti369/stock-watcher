@@ -1,0 +1,173 @@
+"""Free market data for Indian equities.
+
+- History + fundamentals + analyst targets: yfinance (Yahoo).
+- Live/intraday quote: nsepython (NSE) with a yfinance fallback.
+- Recent news headlines: yfinance.
+
+Everything is wrapped in try/except because these are unofficial/free endpoints
+that occasionally rate-limit or change shape. Callers get None / empty rather
+than a crash. A short in-process TTL cache avoids hammering them — but crucially
+we only cache *successful* results, so a transient failure is retried next call
+instead of being frozen (this was the CDSL "all None" bug).
+"""
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import pandas as pd
+import yfinance as yf
+
+from .config import CONFIG
+
+_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _default_ttl() -> int:
+    return int(CONFIG["data"]["cache_minutes"]) * 60
+
+
+def _cached(key: str, ttl: int | None = None):
+    hit = _CACHE.get(key)
+    if hit and (time.time() - hit[0]) < (ttl or _default_ttl()):
+        return hit[1]
+    return None
+
+
+def _store(key: str, value):
+    _CACHE[key] = (time.time(), value)
+    return value
+
+
+def yf_symbol(symbol: str, exchange: str = "NSE") -> str:
+    """TCS -> TCS.NS (NSE) or TCS.BO (BSE). Pass an already-suffixed symbol through."""
+    s = symbol.upper().strip()
+    if s.endswith((".NS", ".BO")):
+        return s
+    return f"{s}.NS" if exchange.upper() == "NSE" else f"{s}.BO"
+
+
+def get_history(symbol: str, exchange: str = "NSE", period: str | None = None) -> pd.DataFrame:
+    """OHLCV DataFrame indexed by date. Empty (uncached) DataFrame on failure."""
+    period = period or CONFIG["data"]["history_period"]
+    key = f"hist:{yf_symbol(symbol, exchange)}:{period}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    try:
+        df = yf.Ticker(yf_symbol(symbol, exchange)).history(period=period, auto_adjust=True)
+    except Exception:
+        df = None
+    if df is None or df.empty:
+        return pd.DataFrame()          # don't cache failures — retry next time
+    return _store(key, df)
+
+
+_FUND_FIELDS = [
+    "shortName", "longName", "sector", "industry", "currency",
+    "trailingPE", "forwardPE", "priceToBook", "pegRatio",
+    "returnOnEquity", "returnOnAssets", "debtToEquity", "currentRatio",
+    "profitMargins", "operatingMargins", "revenueGrowth", "earningsGrowth",
+    "marketCap", "dividendYield", "beta",
+    "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyDayAverage", "twoHundredDayAverage",
+    "currentPrice", "regularMarketPrice", "heldPercentInsiders",
+    # analyst / recommendation data — real inputs for the Suggestions feature
+    "targetMeanPrice", "targetHighPrice", "targetLowPrice",
+    "recommendationKey", "recommendationMean", "numberOfAnalystOpinions",
+]
+
+
+def get_fundamentals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
+    """Subset of Yahoo's .info we score on + analyst targets. {} (uncached) on failure."""
+    key = f"fund:{yf_symbol(symbol, exchange)}"
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    out: dict[str, Any] = {}
+    try:
+        info = yf.Ticker(yf_symbol(symbol, exchange)).info or {}
+        out = {f: info.get(f) for f in _FUND_FIELDS}
+    except Exception:
+        out = {}
+    if not any(v is not None for v in out.values()):
+        return {}                       # don't cache failures
+    return _store(key, out)
+
+
+def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
+    """Latest price + day change. NSE (nsepython) first, yfinance fallback.
+    Keys: price, prev_close, change, pct_change, source, ok. Cached ~2 min."""
+    key = f"live:{yf_symbol(symbol, exchange)}"
+    cached = _cached(key, ttl=120)
+    if cached is not None:
+        return cached
+
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    result = {"price": None, "prev_close": None, "change": None,
+              "pct_change": None, "source": None, "ok": False}
+
+    if exchange.upper() == "NSE":
+        try:
+            from nsepython import nse_eq
+            pi = (nse_eq(sym) or {}).get("priceInfo", {})
+            price = pi.get("lastPrice")
+            if price is not None:
+                result.update(
+                    price=float(price),
+                    prev_close=float(pi["previousClose"]) if pi.get("previousClose") is not None else None,
+                    change=float(pi["change"]) if pi.get("change") is not None else None,
+                    pct_change=float(pi["pChange"]) if pi.get("pChange") is not None else None,
+                    source="nse", ok=True)
+                return _store(key, result)
+        except Exception:
+            pass
+
+    try:
+        fi = yf.Ticker(yf_symbol(symbol, exchange)).fast_info
+        price = getattr(fi, "last_price", None)
+        prev = getattr(fi, "previous_close", None)
+        if price is not None:
+            change = (price - prev) if prev else None
+            pct = (change / prev * 100) if (prev and change is not None) else None
+            result.update(
+                price=float(price),
+                prev_close=float(prev) if prev is not None else None,
+                change=float(change) if change is not None else None,
+                pct_change=float(pct) if pct is not None else None,
+                source="yfinance", ok=True)
+            return _store(key, result)
+    except Exception:
+        pass
+    return result                       # don't cache a miss
+
+
+def get_news(symbol: str, exchange: str = "NSE", limit: int = 6) -> list[dict[str, Any]]:
+    """Recent headlines for the stock (real 'current situation' context). [] on failure."""
+    key = f"news:{yf_symbol(symbol, exchange)}"
+    cached = _cached(key, ttl=1800)
+    if cached is not None:
+        return cached
+    items: list[dict[str, Any]] = []
+    try:
+        for n in (yf.Ticker(yf_symbol(symbol, exchange)).news or [])[:limit]:
+            c = n.get("content", n) if isinstance(n, dict) else {}
+            title = c.get("title")
+            if not title:
+                continue
+            provider = (c.get("provider") or {}).get("displayName") if isinstance(c.get("provider"), dict) else c.get("publisher")
+            items.append({
+                "title": title,
+                "summary": c.get("summary") or c.get("description") or "",
+                "publisher": provider or "",
+                "date": (c.get("pubDate") or c.get("displayTime") or "")[:10],
+            })
+    except Exception:
+        items = []
+    if not items:
+        return []
+    return _store(key, items)
+
+
+def resolve_name(symbol: str, exchange: str = "NSE") -> str:
+    f = get_fundamentals(symbol, exchange)
+    return f.get("longName") or f.get("shortName") or symbol.upper()

@@ -1,0 +1,9 @@
+.venv/
+data/*.db
+data/*.log
+config.yaml
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+scripts/

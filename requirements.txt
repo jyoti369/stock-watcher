@@ -1,0 +1,6 @@
+yfinance>=1.5
+streamlit>=1.59
+pandas>=2.2
+nsepython>=2.9
+requests>=2.32
+pyyaml>=6.0

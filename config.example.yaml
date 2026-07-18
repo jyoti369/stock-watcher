@@ -1,0 +1,24 @@
+# Copy this to config.yaml and fill in what you want. config.yaml is gitignored.
+# Anything you leave blank just disables that feature (e.g. no telegram token = no telegram alerts).
+
+alerts:
+  channels: [telegram, email]   # which channels the watcher uses
+  cooldown_minutes: 360         # don't re-fire the same rule within this window
+
+telegram:
+  # Create a bot with @BotFather, it gives you a token.
+  # Get your chat_id: message the bot, then open
+  # https://api.telegram.org/bot<token>/getUpdates and read chat.id
+  bot_token: ""
+  chat_id: ""
+
+email:
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  username: ""     # your gmail address
+  password: ""     # a Gmail "app password" (not your normal password)
+  to: ""           # where alerts are sent (can be the same address)
+
+data:
+  history_period: "10y"   # how far back to pull price history
+  cache_minutes: 15       # reuse fetched data within this window
