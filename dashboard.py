@@ -158,16 +158,18 @@ with tabs[0]:
                 "1Y %": v.get("ret_1y"), "P/E": v.get("pe"), "ROE %": v.get("roe"),
                 "RSI": v.get("rsi14"), "Health": RATING_BADGE.get(s.get("rating"), "⚪ —"),
             })
-        st.dataframe(
-            pd.DataFrame(rows), width="stretch", hide_index=True,
-            column_config={
-                "Price": st.column_config.NumberColumn(format="₹%.2f"),
-                "Day %": st.column_config.NumberColumn(format="%.2f%%"),
-                "1Y %": st.column_config.NumberColumn(format="%.1f%%"),
-                "P/E": st.column_config.NumberColumn(format="%.1f"),
-                "ROE %": st.column_config.NumberColumn(format="%.1f%%"),
-                "RSI": st.column_config.NumberColumn(format="%.0f"),
-            })
+        df = pd.DataFrame(rows)
+
+        def _pct_color(v):
+            if isinstance(v, (int, float)):
+                return "color: #4ade80" if v > 0 else "color: #fb7185" if v < 0 else ""
+            return ""
+
+        styled = (df.style
+                  .map(_pct_color, subset=["Day %", "1Y %"])
+                  .format({"Price": "₹{:,.2f}", "Day %": "{:+.2f}%", "1Y %": "{:+.1f}%",
+                           "P/E": "{:.1f}", "ROE %": "{:.1f}%", "RSI": "{:.0f}"}, na_rep="—"))
+        st.dataframe(styled, width="stretch", hide_index=True)
         st.caption("Health here is the quick read. Open **Stock analysis** for the deep, "
                    "statement-based view. Prices via NSE live where available, else ~15-min delayed.")
 
@@ -304,12 +306,17 @@ with tabs[2]:
                     st.write(f"• {rc['date']} — {rc['firm']}: {rc['action']} {rc['from']} → {rc['to']}")
 
         if hist is not None and not hist.empty:
-            span = st.radio("Range", ["6M", "1Y", "3Y", "Max"], horizontal=True, index=1)
-            n = {"6M": 126, "1Y": 252, "3Y": 756, "Max": len(hist)}[span]
-            h = hist.tail(n)
-            st.line_chart(pd.DataFrame({"Close": h["Close"],
-                                        "MA50": h["Close"].rolling(50).mean(),
-                                        "MA200": h["Close"].rolling(200).mean()}))
+            span = st.radio("Range", ["1M", "2M", "3M", "6M", "1Y", "3Y", "Max"],
+                            horizontal=True, index=4)
+            n = {"1M": 21, "2M": 42, "3M": 63, "6M": 126, "1Y": 252,
+                 "3Y": 756, "Max": len(hist)}[span]
+            # compute moving averages on the FULL series, then slice — so the MA
+            # lines are still correct even on a 1-month view
+            close_full = hist["Close"]
+            chart = pd.DataFrame({"Close": close_full,
+                                  "MA50": close_full.rolling(50).mean(),
+                                  "MA200": close_full.rolling(200).mean()}).tail(n)
+            st.line_chart(chart)
             st.caption("Prices are dividend-adjusted (total return), so historical values, "
                        "returns and 52-week range may read differently from raw price charts elsewhere.")
 
@@ -415,34 +422,90 @@ with tabs[2]:
 # ================================================================= alerts
 with tabs[3]:
     st.subheader("🔔 Alert rules")
-    st.caption("A rule fires when ALL its conditions hold — e.g. P/E below 25 AND today down 3%.")
+    st.caption("Pick a stock, see its live numbers, and add an alert in one click. "
+               "Alerts ping your Telegram + email 24/7.")
 
-    with st.expander("➕ New rule", expanded=not db.get_rules(active_only=False)):
-        with st.form("add_rule", clear_on_submit=True):
-            rc1, rc2, rc3 = st.columns([1, 1, 2])
-            r_sym = rc1.text_input("Symbol", placeholder="TCS").strip().upper()
-            r_exch = rc2.selectbox("Exchange", ["NSE", "BSE"], key="rule_exch")
-            r_label = rc3.text_input("Label", placeholder="cheap dip to buy-watch")
-            mode_label = st.radio(
-                "When to fire",
-                ["Every check while true (level)", "Only when it crosses into true (edge)"],
-                help="Edge = alert once when the condition first becomes true, not repeatedly while it stays true.")
-            r_mode = "edge" if mode_label.startswith("Only") else "level"
-            keys = list(watcher.METRICS.keys())
-            conditions = []
-            for i in range(3):
-                cc1, cc2, cc3 = st.columns([3, 1, 2])
-                met = cc1.selectbox(f"Metric {i+1}", ["—"] + keys,
-                                    format_func=lambda k: watcher.METRICS.get(k, k), key=f"met_{i}")
-                op = cc2.selectbox("Op", list(watcher.OPS.keys()), key=f"op_{i}")
-                val = cc3.number_input("Value", value=0.0, step=1.0, key=f"val_{i}")
-                if met != "—":
-                    conditions.append({"metric": met, "op": op, "value": val})
-            if st.form_submit_button("Create rule") and r_sym and conditions:
-                db.add_rule(r_sym, r_exch, r_label or "alert", conditions, mode=r_mode)
-                repo_state.export_config()
-                st.toast(f"Rule created for {r_sym}")
-                st.rerun()
+    with st.expander("➕ New alert", expanded=not db.get_rules(active_only=False)):
+        ac1, ac2 = st.columns([2, 1])
+        wl_opts = [w["symbol"] for w in watchlist]
+        typed = ac1.text_input("Symbol", placeholder="type any, e.g. CDSL").strip().upper()
+        a_sym = typed
+        if not typed and wl_opts:
+            pick = ac1.selectbox("…or pick from watchlist", ["—"] + wl_opts, key="al_pick")
+            a_sym = "" if pick == "—" else pick
+        a_exch = ac2.selectbox("Exchange", ["NSE", "BSE"], key="al_exch")
+
+        def _make(label, conditions, mode="edge"):
+            db.add_rule(a_sym, a_exch, label, conditions, mode=mode)
+            repo_state.export_config()
+            st.toast(f"Alert added — {a_sym}: {label}")
+            st.rerun()
+
+        if not a_sym:
+            st.caption("Type or pick a symbol to see its current numbers and add alerts in one click.")
+        else:
+            snap = watcher.gather_values(a_sym, a_exch)
+            price = snap.get("price")
+            if price is None:
+                st.warning(f"Couldn't fetch data for {a_sym} — check the symbol/exchange.")
+            else:
+                st.markdown(f"**{a_sym} right now** — set alerts off these:")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Price", inr(price))
+                m2.metric("Day", f"{snap['pct_change_day']:+.1f}%" if snap.get("pct_change_day") is not None else "—")
+                m3.metric("RSI", f"{snap['rsi14']:.0f}" if snap.get("rsi14") is not None else "—")
+                m4.metric("P/E", f"{snap['pe']:.1f}" if snap.get("pe") else "—")
+                extras = []
+                for k, lbl in [("ret_1w", "1w"), ("ret_1m", "1m"), ("ret_1y", "1y"),
+                               ("price_vs_ma50", "vs 50-DMA"), ("price_vs_ma200", "vs 200-DMA")]:
+                    if snap.get(k) is not None:
+                        extras.append(f"{lbl} {snap[k]:+.1f}%")
+                if extras:
+                    st.caption(" · ".join(extras))
+
+                st.markdown("**One-click alerts** (fire once when it happens)")
+                q = st.columns(4)
+                if q[0].button("📉 Down 3% in a day", key="qa1"):
+                    _make("down 3% in a day", [{"metric": "pct_change_day", "op": "<", "value": -3}])
+                if q[1].button("RSI oversold <30", key="qa2"):
+                    _make("RSI oversold (<30)", [{"metric": "rsi14", "op": "<", "value": 30}])
+                if q[2].button("RSI overbought >70", key="qa3"):
+                    _make("RSI overbought (>70)", [{"metric": "rsi14", "op": ">", "value": 70}])
+                if q[3].button("Below 200-DMA", key="qa4"):
+                    _make("below 200-day avg", [{"metric": "price_vs_ma200", "op": "<", "value": 0}])
+
+                st.markdown("**Price target** (pre-filled ±5% from now — just tweak)")
+                t1, t2 = st.columns(2)
+                lo = t1.number_input("Alert if price falls below ₹", value=float(round(price * 0.95)),
+                                     step=1.0, key="tgt_lo")
+                if t1.button("Add drop alert", key="tgt_lo_b"):
+                    _make(f"price below ₹{lo:.0f}", [{"metric": "price", "op": "<", "value": lo}])
+                hi = t2.number_input("Alert if price rises above ₹", value=float(round(price * 1.05)),
+                                     step=1.0, key="tgt_hi")
+                if t2.button("Add rise alert", key="tgt_hi_b"):
+                    _make(f"price above ₹{hi:.0f}", [{"metric": "price", "op": ">", "value": hi}])
+
+                with st.expander("Advanced — custom multi-condition rule"):
+                    with st.form("add_rule_custom", clear_on_submit=True):
+                        r_label = st.text_input("Label", placeholder="cheap dip to buy-watch")
+                        mode_label = st.radio("When to fire",
+                                              ["Only when it crosses in (edge)", "Every check while true (level)"])
+                        r_mode = "edge" if mode_label.startswith("Only") else "level"
+                        keys = list(watcher.METRICS.keys())
+                        conditions = []
+                        for i in range(3):
+                            cc1, cc2, cc3 = st.columns([3, 1, 2])
+                            met = cc1.selectbox(f"Metric {i + 1}", ["—"] + keys,
+                                                format_func=lambda k: watcher.METRICS.get(k, k), key=f"met_{i}")
+                            op = cc2.selectbox("Op", list(watcher.OPS.keys()), key=f"op_{i}")
+                            dv = cc3.number_input("Value", value=0.0, step=1.0, key=f"val_{i}")
+                            if met != "—":
+                                conditions.append({"metric": met, "op": op, "value": dv})
+                        if st.form_submit_button("Create rule") and conditions:
+                            db.add_rule(a_sym, a_exch, r_label or "alert", conditions, mode=r_mode)
+                            repo_state.export_config()
+                            st.toast(f"Rule created for {a_sym}")
+                            st.rerun()
 
     rules = db.get_rules(active_only=False)
     for rule in rules:
