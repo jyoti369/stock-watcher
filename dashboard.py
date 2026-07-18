@@ -285,6 +285,8 @@ with tabs[2]:
             st.line_chart(pd.DataFrame({"Close": h["Close"],
                                         "MA50": h["Close"].rolling(50).mean(),
                                         "MA200": h["Close"].rolling(200).mean()}))
+            st.caption("Prices are dividend-adjusted (total return), so historical values, "
+                       "returns and 52-week range may read differently from raw price charts elsewhere.")
 
         left, right = st.columns([3, 2])
         with left:
@@ -307,9 +309,10 @@ with tabs[2]:
         if val:
             st.markdown("**Valuation vs its own 5-year history**")
             st.progress(min(val["percentile"], 100) / 100)
-            st.caption(f"P/E {val['current_pe']} is at the **{val['percentile']}th percentile** of its "
-                       f"own range ({val['min_pe']}–{val['max_pe']}, median {val['median_pe']}) — "
-                       f"{val['verdict']}.")
+            st.caption(f"P/E (on reported annual EPS) {val['current_pe']} is at the "
+                       f"**{val['percentile']}th percentile** of its own range "
+                       f"({val['min_pe']}–{val['max_pe']}, median {val['median_pe']}) — {val['verdict']}. "
+                       f"This is a different lens from the headline trailing P/E above.")
 
         # peers
         peer = sectors.peer_comparison(picked_sym, picked_exch)
