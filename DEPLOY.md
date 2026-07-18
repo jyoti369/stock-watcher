@@ -51,6 +51,25 @@ your watchlist. This is the primary path below. A fully-hosted container option
    Watch the run; if a rule’s conditions are met you’ll get the alert. It also runs
    automatically every 30 min in market hours after this.
 
+### Making phone/cloud edits permanent (STOCKWATCH_GH_TOKEN)
+
+The hosted app can't `git push`, so by default changes made there (holdings,
+rules, scans) only live until the container restarts. Fix: give it a token so it
+saves through the GitHub API.
+
+1. GitHub → Settings → **Developer settings** → **Personal access tokens** →
+   **Fine-grained tokens** → *Generate new token*.
+2. Repository access: **Only select repositories** → `stock-watcher`.
+   Permissions: **Contents → Read and write**. Expiry: up to you (set a reminder).
+3. Copy the `github_pat_…` value and add one line to the Streamlit Cloud
+   secrets box:
+   ```toml
+   STOCKWATCH_GH_TOKEN = "github_pat_..."
+   ```
+Sidebar shows “🟢 Changes auto-save to GitHub” when it's active. Scope stays
+limited to this one repo, so the blast radius if it ever leaks is small — but
+rotate it like any secret.
+
 ### Managing your watchlist / rules
 Run the dashboard locally, make changes, then click **Sync to GitHub**:
 ```bash

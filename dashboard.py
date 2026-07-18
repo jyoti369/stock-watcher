@@ -18,15 +18,15 @@ import streamlit as st
 try:
     for _k in ["STOCKWATCH_TG_TOKEN", "STOCKWATCH_TG_CHAT", "STOCKWATCH_SMTP_USER",
                "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO", "STOCKWATCH_APP_PASSWORD",
-               "STOCKWATCH_GEMINI_KEY", "STOCKWATCH_OPENAI_KEY"]:
+               "STOCKWATCH_GEMINI_KEY", "STOCKWATCH_OPENAI_KEY", "STOCKWATCH_GH_TOKEN"]:
         if _k in st.secrets:
             os.environ[_k] = str(st.secrets[_k])
 except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, portfolio, projection, repo_state, scan_history,
-                 sectors, suggestions, verdict, watcher)
+                 fundamentals, gh_sync, portfolio, projection, repo_state,
+                 scan_history, sectors, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -92,13 +92,16 @@ def sync_to_github() -> tuple[bool, str]:
 
 
 def auto_sync() -> None:
-    """Export state and quietly push to GitHub so the 24/7 watcher stays current.
-    Stops retrying after the first failure this session (e.g. on Streamlit Cloud,
-    where the checkout can't push) — the manual sidebar button stays as fallback."""
+    """Export state and quietly push it to GitHub so the 24/7 watcher stays current.
+    Tries `git push` first (local); where that's impossible (Streamlit Cloud) it
+    falls back to the GitHub API if a token is configured. Only gives up for the
+    session when both paths fail — the manual sidebar button stays as fallback."""
     repo_state.export_config()
     if st.session_state.get("_autosync_dead"):
         return
     ok, _ = sync_to_github()
+    if not ok and gh_sync.available():
+        ok, _ = gh_sync.push_state()
     if not ok:
         st.session_state["_autosync_dead"] = True
 
@@ -153,8 +156,14 @@ with st.sidebar:
 
     if st.button("⬆️ Sync watchlist/rules to GitHub", width="stretch"):
         ok, msg = sync_to_github()
+        if not ok and gh_sync.available():
+            ok, msg = gh_sync.push_state()
         st.toast(("✅ " if ok else "⚠️ ") + msg)
-    st.caption("Sync so the 24/7 GitHub Actions watcher sees your latest watchlist & rules.")
+    if gh_sync.available():
+        st.caption("🟢 Changes auto-save to GitHub (works from your phone too).")
+    else:
+        st.caption("Auto-sync works locally via git. To make changes from the hosted app "
+                   "stick too, add a STOCKWATCH_GH_TOKEN secret (see DEPLOY.md).")
 
 
 watchlist = db.get_watchlist()
