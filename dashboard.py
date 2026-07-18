@@ -6,16 +6,34 @@ Run from the project root:
 """
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pandas as pd
 import streamlit as st
 
-import subprocess
+# On Streamlit Cloud, secrets live in st.secrets (not env). Bridge them to env
+# BEFORE importing src.config so it picks them up. No-op locally / if unset.
+try:
+    for _k in ["STOCKWATCH_TG_TOKEN", "STOCKWATCH_TG_CHAT", "STOCKWATCH_SMTP_USER",
+               "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO"]:
+        if _k in st.secrets:
+            os.environ[_k] = str(st.secrets[_k])
+except Exception:
+    pass
 
 from src import (alerts, analysis, bearcase, datasource, db, projection,
                  repo_state, sectors, suggestions, watcher)
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 db.init_db()
+
+# fresh cloud container has an empty db — seed watchlist/rules from committed state
+if not db.get_watchlist() and repo_state.WATCHLIST_JSON.exists():
+    try:
+        repo_state.import_from_repo()
+    except Exception:
+        pass
 
 RATING_BADGE = {"OK": "🟢 OK", "Mixed": "🟡 Mixed", "Weak": "🔴 Weak", "Unknown": "⚪ —"}
 STATUS_ICON = {"good": "🟢", "ok": "🟡", "weak": "🔴", "info": "ℹ️"}
@@ -163,8 +181,8 @@ with tabs[1]:
 
     ranked = st.session_state.get("suggestions", [])
     if ranked:
-        st.warning("Candidates to research, **not** advice. Profit figures are probability "
-                   "ranges from past behaviour — never guaranteed. Check before you buy.")
+        st.info("Candidates to research, **not** advice. Profit figures are probability "
+                "ranges from past behaviour — never guaranteed. Check before you buy.")
 
         for i, r in enumerate(ranked, 1):
             av = r["analyst"]

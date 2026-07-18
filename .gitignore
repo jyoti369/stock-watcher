@@ -1,5 +1,6 @@
 .venv/
 config.yaml
+.streamlit/secrets.toml
 data/*.db
 __pycache__/
 *.pyc

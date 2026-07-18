@@ -1,0 +1,11 @@
+# Calm dark theme — replaces Streamlit's default red (#FF4B4B) accent with teal.
+[theme]
+base = "dark"
+primaryColor = "#14b8a6"                 # teal accent (tabs, buttons, sliders)
+backgroundColor = "#0f172a"              # slate-900
+secondaryBackgroundColor = "#1e293b"     # slate-800 (cards, sidebar)
+textColor = "#e2e8f0"                    # slate-200
+font = "sans serif"
+
+[server]
+headless = true
