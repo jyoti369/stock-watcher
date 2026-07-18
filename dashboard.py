@@ -508,17 +508,27 @@ with tabs[3]:
                             st.rerun()
 
     rules = db.get_rules(active_only=False)
+    if rules:
+        st.caption("**Pause** silences an alert without deleting it; **Resume** turns it back on.")
     for rule in rules:
         cond_txt = " AND ".join(
             f"{watcher.METRICS.get(c['metric'], c['metric'])} {c['op']} {c['value']}"
             for c in rule["conditions"])
-        cols = st.columns([4, 1, 1])
-        mode_tag = " · ⚡edge" if rule.get("mode") == "edge" else ""
-        cols[0].write(f"{'🟢' if rule['active'] else '⏸️'} **{rule['symbol']}** — {rule.get('label')}{mode_tag}  \n{cond_txt}")
-        if cols[1].button("Toggle", key=f"tog_{rule['id']}"):
-            db.set_rule_active(rule["id"], not rule["active"]); repo_state.export_config(); st.rerun()
+        active = bool(rule["active"])
+        mode_tag = " · ⚡ edge" if rule.get("mode") == "edge" else ""
+        status = "🟢 Active" if active else "⏸️ Paused"
+        cols = st.columns([5, 1, 1])
+        cols[0].write(f"{status} · **{rule['symbol']}** — {rule.get('label')}{mode_tag}  \n{cond_txt}")
+        if cols[1].button("Pause" if active else "Resume", key=f"tog_{rule['id']}"):
+            db.set_rule_active(rule["id"], not active)
+            repo_state.export_config()
+            st.toast(("Paused" if active else "Resumed") + f" — {rule['symbol']}")
+            st.rerun()
         if cols[2].button("Delete", key=f"del_{rule['id']}"):
-            db.delete_rule(rule["id"]); repo_state.export_config(); st.rerun()
+            db.delete_rule(rule["id"])
+            repo_state.export_config()
+            st.toast(f"Deleted — {rule['symbol']}")
+            st.rerun()
     if not rules:
         st.info("No rules yet.")
 
