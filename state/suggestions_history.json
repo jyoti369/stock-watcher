@@ -1,0 +1,43 @@
+[
+ {
+  "ts": "18 Jul 2026, 18:16",
+  "params": {
+   "universe": "Both",
+   "period": "6 months",
+   "amount": 20000,
+   "top_n": 3
+  },
+  "picks": [
+   {
+    "symbol": "ASIANPAINT",
+    "name": "Asian Paints Limited",
+    "score": 84,
+    "health": "OK",
+    "health_score": 100,
+    "price_then": 2689.0,
+    "analyst_target": 2903.89,
+    "stance": "Quality business, but priced richly — a lot of good news is already in the price."
+   },
+   {
+    "symbol": "ICICIBANK",
+    "name": "ICICI Bank Limited",
+    "score": 81,
+    "health": "OK",
+    "health_score": 89,
+    "price_then": 1444.3,
+    "analyst_target": 1683.1,
+    "stance": "A mixed picture — no clear edge in the data either way right now."
+   },
+   {
+    "symbol": "SBIN",
+    "name": "State Bank of India",
+    "score": 77,
+    "health": "Mixed",
+    "health_score": 61,
+    "price_then": 1044.3,
+    "analyst_target": 1200.08,
+    "stance": "A mixed financial picture and a full price — limited margin for error here."
+   }
+  ]
+ }
+]
