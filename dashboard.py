@@ -25,8 +25,8 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, portfolio, projection, repo_state, sectors,
-                 suggestions, verdict, watcher)
+                 fundamentals, portfolio, projection, repo_state, scan_history,
+                 sectors, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -76,7 +76,7 @@ def sync_to_github() -> tuple[bool, str]:
     repo_state.export_config()
     try:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
-                        "state/holdings.json"],
+                        "state/holdings.json", "state/suggestions_history.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -306,11 +306,25 @@ with tabs[2]:
             with st.spinner(f"Scoring {len(set(uni))} stocks, then deep-checking the top {top_n}…"):
                 ranked_now = suggestions.rank(uni, top_n=top_n)
                 st.session_state["suggestions"] = ranked_now
-                st.session_state["suggestions_ts"] = datetime.now().strftime("%d %b, %H:%M")
+                st.session_state["suggestions_ts"] = datetime.now().strftime("%d %b %Y, %H:%M")
                 try:                       # persist so the next visit is instant
                     import pickle
                     SUGG_CACHE.write_bytes(pickle.dumps(
                         {"ts": st.session_state["suggestions_ts"], "rows": ranked_now}))
+                except Exception:
+                    pass
+                # append to the permanent scan history (with stance one-liners)
+                try:
+                    stances = {r["symbol"]: verdict.build(
+                        r["health"], r.get("metrics", {}),
+                        (r.get("bear") or {}).get("valuation"), r.get("peer"))["stance"]
+                        for r in ranked_now}
+                    scan_history.append(
+                        st.session_state["suggestions_ts"],
+                        {"universe": universe_choice, "period": period_label,
+                         "amount": amount, "top_n": top_n},
+                        ranked_now, stances)
+                    auto_sync()
                 except Exception:
                     pass
 
@@ -402,6 +416,57 @@ with tabs[2]:
     else:
         st.caption("👆 Pick a universe, period and amount, then hit **Find suggestions**. "
                    "Takes ~30–60s — it scores every stock live, then deep-checks the top picks.")
+
+    # ---------------- scan history: every past scan, and how its picks did
+    past = scan_history.load()
+    if past:
+        st.markdown("---")
+        st.markdown("#### 📜 Scan history")
+        st.caption("Every scan is saved with the prices at that moment — open one and hit "
+                   "**How did these do?** to see the return since. This keeps the engine honest.")
+        for si, scan in enumerate(past):
+            p = scan.get("params", {})
+            n_picks = len(scan.get("picks", []))
+            with st.expander(f"{scan['ts']} · {p.get('universe', '?')} · top {n_picks}"):
+                perf_key = f"scanperf_{si}"
+                show_perf = st.session_state.get(perf_key)
+                if st.button("📈 How did these do?", key=f"perfbtn_{si}", disabled=bool(show_perf)):
+                    perf = {}
+                    with st.spinner("Fetching current prices…"):
+                        for pick in scan["picks"]:
+                            v = watcher.gather_values(pick["symbol"], "NSE")
+                            perf[pick["symbol"]] = v.get("price")
+                    st.session_state[perf_key] = perf
+                    st.rerun()
+
+                hrows = []
+                for pick in scan["picks"]:
+                    row = {"Symbol": pick["symbol"], "Score": pick.get("score"),
+                           "Health": pick.get("health"),
+                           "Price then": pick.get("price_then")}
+                    if show_perf:
+                        now = show_perf.get(pick["symbol"])
+                        row["Price now"] = now
+                        row["Since %"] = (round((now / pick["price_then"] - 1) * 100, 1)
+                                          if (now and pick.get("price_then")) else None)
+                    row["Bottom line (then)"] = (pick.get("stance") or "")[:70]
+                    hrows.append(row)
+                hdf = pd.DataFrame(hrows)
+                if show_perf and "Since %" in hdf:
+                    st.dataframe(
+                        hdf.style.map(
+                            lambda x: ("color: #4ade80" if isinstance(x, (int, float)) and x > 0
+                                       else "color: #fb7185" if isinstance(x, (int, float)) and x < 0
+                                       else ""), subset=["Since %"])
+                           .format({"Price then": "₹{:,.0f}", "Price now": "₹{:,.0f}",
+                                    "Since %": "{:+.1f}%", "Score": "{:.0f}"}, na_rep="—"),
+                        width="stretch", hide_index=True)
+                else:
+                    st.dataframe(hdf, width="stretch", hide_index=True)
+        if st.button("🗑️ Clear history"):
+            scan_history.clear()
+            auto_sync()
+            st.rerun()
 
 # ============================================================ stock detail
 with tabs[3]:

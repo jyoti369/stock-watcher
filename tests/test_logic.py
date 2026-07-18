@@ -133,6 +133,23 @@ def test_portfolio_pnl():
     assert abs(tot["day_move"] - (22000 - 22000 / 1.01)) < 0.01
 
 
+def test_scan_history_roundtrip(tmp_path, monkeypatch):
+    from src import scan_history
+    monkeypatch.setattr(scan_history, "HISTORY_JSON", tmp_path / "hist.json")
+    monkeypatch.setattr(scan_history, "STATE_DIR", tmp_path)
+    ranked = [{"symbol": "TCS", "name": "Tata Consultancy", "score": 71,
+               "health": {"rating": "OK", "score": 80}, "price": 2269.0,
+               "analyst": {"target": 2500.0}}]
+    scan_history.append("18 Jul 2026, 20:00", {"universe": "test"}, ranked, {"TCS": "Solid."})
+    scans = scan_history.load()
+    assert len(scans) == 1 and scans[0]["picks"][0]["price_then"] == 2269.0
+    assert scans[0]["picks"][0]["stance"] == "Solid."
+    # cap: 25 more appends keep only MAX_SCANS
+    for i in range(25):
+        scan_history.append(f"t{i}", {}, ranked, {})
+    assert len(scan_history.load()) == scan_history.MAX_SCANS
+
+
 def test_rule_key_stable_and_distinct():
     base = {"symbol": "TCS", "exchange": "NSE", "label": "a",
             "conditions": [{"metric": "price", "op": ">", "value": 1}]}
