@@ -36,14 +36,26 @@ st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 
 def _require_password() -> None:
     """Gate the app behind STOCKWATCH_APP_PASSWORD when it's set (e.g. on a public
-    Streamlit Cloud URL). No password set = no gate, so local use is unaffected."""
+    Streamlit Cloud URL). No password set = no gate, so local use is unaffected.
+
+    After a correct entry we stamp a key into the URL (?k=…), so refreshes and
+    bookmarks stay signed in — you type the password once per device, not per
+    reload. Sharing that URL shares access, same as sharing the password."""
+    import hashlib
     pw = os.environ.get("STOCKWATCH_APP_PASSWORD", "")
-    if not pw or st.session_state.get("_authed"):
+    if not pw:
+        return
+    key = hashlib.sha256(f"stockwatch:{pw}".encode()).hexdigest()[:20]
+    if st.session_state.get("_authed") or st.query_params.get("k") == key:
+        st.session_state["_authed"] = True
+        if st.query_params.get("k") != key:
+            st.query_params["k"] = key          # keep it in the URL for next refresh
         return
     st.markdown("### 🔒 Stock Watcher")
     entered = st.text_input("Password", type="password")
     if entered == pw:
         st.session_state["_authed"] = True
+        st.query_params["k"] = key
         st.rerun()
     elif entered:
         st.error("Wrong password")
