@@ -91,20 +91,21 @@ def _in_cooldown(last_triggered: str | None) -> bool:
     return datetime.now(timezone.utc) - last < window
 
 
-def evaluate_rule(rule: dict, values: dict) -> tuple[bool, list[str]]:
-    """True only if every condition holds. Returns (fired, human reasons)."""
+def evaluate_rule(rule: dict, values: dict) -> tuple[bool, list[str], bool]:
+    """Returns (all_conditions_true, human reasons, evaluable).
+    evaluable is False when a condition's data is missing — the caller then leaves
+    the rule's edge-state untouched instead of treating a data gap as 'false'."""
     reasons = []
     for cond in rule["conditions"]:
         metric, op, target = cond.get("metric"), cond.get("op"), cond.get("value")
         actual = values.get(metric)
         fn = OPS.get(op)
         if actual is None or fn is None:
-            return False, []  # missing data => can't confirm, don't fire
+            return False, [], False        # can't determine — data gap
         if not fn(actual, float(target)):
-            return False, []
-        label = METRICS.get(metric, metric)
-        reasons.append(f"{label}: {actual} {op} {target}")
-    return (len(reasons) > 0), reasons
+            return False, [], True         # evaluable, condition simply not met
+        reasons.append(f"{METRICS.get(metric, metric)}: {actual} {op} {target}")
+    return True, reasons, True
 
 
 def run_once(verbose: bool = True) -> list[dict]:
@@ -120,12 +121,24 @@ def run_once(verbose: bool = True) -> list[dict]:
             values_cache[key] = gather_values(rule["symbol"], rule["exchange"])
         values = values_cache[key]
 
-        ok, reasons = evaluate_rule(rule, values)
-        if not ok:
+        fired_now, reasons, evaluable = evaluate_rule(rule, values)
+        if not evaluable:
+            if verbose:
+                print(f"[skip] {rule['symbol']} rule #{rule['id']}: data unavailable")
             continue
-        if _in_cooldown(rule.get("last_triggered")):
+
+        mode = rule.get("mode", "level")
+        was_true = rule.get("last_state") == 1
+        db.set_last_state(rule["id"], fired_now)     # record every evaluable run
+
+        should_fire = fired_now
+        if mode == "edge" and was_true:
+            should_fire = False                       # already true last time — wait for a re-cross
+        if should_fire and _in_cooldown(rule.get("last_triggered")):
             if verbose:
                 print(f"[cooldown] {rule['symbol']} rule #{rule['id']} would fire, suppressed")
+            should_fire = False
+        if not should_fire:
             continue
 
         label = rule.get("label") or "alert"

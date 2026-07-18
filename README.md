@@ -50,6 +50,25 @@ cp scripts/com.stockwatcher.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.stockwatcher.plist
 ```
 Edit the paths in the plist first if the project isn't at the default location.
+(For always-on/no-machine alerts, GitHub Actions runs the watcher instead — see DEPLOY.md.)
+
+## Alert types & reliability
+
+- **Level vs edge rules** — a *level* rule fires every check while its conditions are
+  true (throttled by cooldown); an *edge* rule fires once when they first *become*
+  true (a crossing). Pick per rule in the Alerts tab.
+- **Daily heartbeat** — `src/heartbeat.py` sends one digest a day (watchlist snapshot +
+  a health line), so silence from the watcher means "nothing triggered", not "it broke".
+- **Retries + fallback** — data fetches retry with backoff, and a symbol added under the
+  wrong exchange auto-falls back to the other (NSE↔BSE).
+
+## Tests
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+Offline unit tests cover the metric, scoring, rule and projection maths; they also run
+in CI on every push (`.github/workflows/tests.yml`).
 
 ## Where the data comes from
 

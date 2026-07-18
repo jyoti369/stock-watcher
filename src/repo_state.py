@@ -51,7 +51,7 @@ def export_config() -> None:
     _write(WATCHLIST_JSON, db.get_watchlist())
     _write(RULES_JSON, [
         {"symbol": r["symbol"], "exchange": r["exchange"], "label": r.get("label"),
-         "conditions": r["conditions"], "active": r["active"]}
+         "conditions": r["conditions"], "active": r["active"], "mode": r.get("mode", "level")}
         for r in db.get_rules(active_only=False)
     ])
 
@@ -68,16 +68,20 @@ def import_from_repo() -> None:
     for w in _read(WATCHLIST_JSON, []):
         db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"))
 
-    cooldowns = _read(ALERT_STATE_JSON, {})
+    saved = _read(ALERT_STATE_JSON, {})
     for r in _read(RULES_JSON, []):
         if not r.get("active", 1):
             continue
         rid = db.add_rule(r["symbol"], r.get("exchange", "NSE"),
-                          r.get("label") or "alert", r["conditions"])
-        last = cooldowns.get(rule_key(r))
-        if last:
-            with db.connect() as conn:
-                conn.execute("UPDATE alert_rules SET last_triggered=? WHERE id=?", (last, rid))
+                          r.get("label") or "alert", r["conditions"], mode=r.get("mode", "level"))
+        st = saved.get(rule_key(r))
+        if isinstance(st, str):                      # legacy format: bare timestamp
+            db.set_last_triggered(rid, st)
+        elif isinstance(st, dict):
+            if st.get("triggered"):
+                db.set_last_triggered(rid, st["triggered"])
+            if st.get("state") is not None:
+                db.set_last_state(rid, bool(st["state"]))
 
 
 # ---- called by the ACTION after the watcher runs -------------------------
@@ -85,8 +89,10 @@ def import_from_repo() -> None:
 def export_state() -> None:
     """Persist cooldown timestamps + append the fired log for the next run."""
     rules = db.get_rules(active_only=False)
-    _write(ALERT_STATE_JSON, {rule_key(r): r["last_triggered"]
-                              for r in rules if r.get("last_triggered")})
+    _write(ALERT_STATE_JSON, {
+        rule_key(r): {"triggered": r.get("last_triggered"), "state": r.get("last_state")}
+        for r in rules if r.get("last_triggered") or r.get("last_state") is not None
+    })
 
     log = _read(ALERTS_LOG_JSON, [])
     seen = {(e["ts"], e["message"]) for e in log}

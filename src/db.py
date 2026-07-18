@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     conditions       TEXT NOT NULL,    -- JSON list of {metric, op, value}, ANDed together
     active           INTEGER NOT NULL DEFAULT 1,
     created_at       TEXT NOT NULL,
-    last_triggered   TEXT
+    last_triggered   TEXT,
+    mode             TEXT NOT NULL DEFAULT 'level',  -- 'level' = while true, 'edge' = on false->true
+    last_state       INTEGER           -- last evaluation (1/0), for edge detection
 );
 
 CREATE TABLE IF NOT EXISTS alert_history (
@@ -73,6 +75,12 @@ def connect():
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # migrate older DBs that predate the edge-alert columns
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(alert_rules)").fetchall()}
+        if "mode" not in cols:
+            conn.execute("ALTER TABLE alert_rules ADD COLUMN mode TEXT NOT NULL DEFAULT 'level'")
+        if "last_state" not in cols:
+            conn.execute("ALTER TABLE alert_rules ADD COLUMN last_state INTEGER")
 
 
 # ---- watchlist -----------------------------------------------------------
@@ -111,12 +119,13 @@ def save_snapshot(symbol: str, exchange: str, price: float | None, metrics: dict
 
 # ---- alert rules ---------------------------------------------------------
 
-def add_rule(symbol: str, exchange: str, label: str, conditions: list[dict]) -> int:
+def add_rule(symbol: str, exchange: str, label: str, conditions: list[dict],
+             mode: str = "level") -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO alert_rules(symbol, exchange, label, conditions, active, created_at) "
-            "VALUES (?,?,?,?,1,?)",
-            (symbol.upper(), exchange.upper(), label, json.dumps(conditions), now_iso()),
+            "INSERT INTO alert_rules(symbol, exchange, label, conditions, active, created_at, mode) "
+            "VALUES (?,?,?,?,1,?,?)",
+            (symbol.upper(), exchange.upper(), label, json.dumps(conditions), now_iso(), mode),
         )
         return cur.lastrowid
 
@@ -148,6 +157,16 @@ def delete_rule(rule_id: int) -> None:
 def mark_triggered(rule_id: int) -> None:
     with connect() as conn:
         conn.execute("UPDATE alert_rules SET last_triggered=? WHERE id=?", (now_iso(), rule_id))
+
+
+def set_last_state(rule_id: int, state: bool) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE alert_rules SET last_state=? WHERE id=?", (1 if state else 0, rule_id))
+
+
+def set_last_triggered(rule_id: int, iso: str) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE alert_rules SET last_triggered=? WHERE id=?", (iso, rule_id))
 
 
 # ---- alert history -------------------------------------------------------

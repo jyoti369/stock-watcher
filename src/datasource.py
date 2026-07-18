@@ -39,6 +39,26 @@ def _store(key: str, value):
     return value
 
 
+def _with_retry(fn, attempts: int = 3, backoff: float = 1.5):
+    """Call fn() up to `attempts` times with linear backoff. fn returns a truthy
+    result on success or None/empty to signal a retryable miss (rate-limit, gap).
+    Returns the successful result, or None if every attempt missed."""
+    for i in range(attempts):
+        try:
+            result = fn()
+            if result is not None and not (hasattr(result, "empty") and result.empty):
+                return result
+        except Exception:
+            pass
+        if i < attempts - 1:
+            time.sleep(backoff * (i + 1))
+    return None
+
+
+def _other_exchange(exchange: str) -> str:
+    return "BSE" if exchange.upper() == "NSE" else "NSE"
+
+
 def yf_symbol(symbol: str, exchange: str = "NSE") -> str:
     """TCS -> TCS.NS (NSE) or TCS.BO (BSE). Pass an already-suffixed symbol through."""
     s = symbol.upper().strip()
@@ -47,18 +67,25 @@ def yf_symbol(symbol: str, exchange: str = "NSE") -> str:
     return f"{s}.NS" if exchange.upper() == "NSE" else f"{s}.BO"
 
 
+def _has_suffix(symbol: str) -> bool:
+    return symbol.upper().strip().endswith((".NS", ".BO"))
+
+
 def get_history(symbol: str, exchange: str = "NSE", period: str | None = None) -> pd.DataFrame:
-    """OHLCV DataFrame indexed by date. Empty (uncached) DataFrame on failure."""
+    """OHLCV DataFrame indexed by date. Retries on transient misses, and if the
+    chosen exchange has no data, falls back to the other one (e.g. a name added
+    as BSE that only Yahoo-lists on NSE). Empty (uncached) DataFrame on failure."""
     period = period or CONFIG["data"]["history_period"]
     key = f"hist:{yf_symbol(symbol, exchange)}:{period}"
     cached = _cached(key)
     if cached is not None:
         return cached
-    try:
-        df = yf.Ticker(yf_symbol(symbol, exchange)).history(period=period, auto_adjust=True)
-    except Exception:
-        df = None
-    if df is None or df.empty:
+
+    df = _with_retry(lambda: yf.Ticker(yf_symbol(symbol, exchange)).history(period=period, auto_adjust=True))
+    if df is None and not _has_suffix(symbol):
+        alt = _other_exchange(exchange)
+        df = _with_retry(lambda: yf.Ticker(yf_symbol(symbol, alt)).history(period=period, auto_adjust=True))
+    if df is None:
         return pd.DataFrame()          # don't cache failures — retry next time
     return _store(key, df)
 
@@ -83,13 +110,19 @@ def get_fundamentals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     cached = _cached(key)
     if cached is not None:
         return cached
-    out: dict[str, Any] = {}
-    try:
-        info = yf.Ticker(yf_symbol(symbol, exchange)).info or {}
-        out = {f: info.get(f) for f in _FUND_FIELDS}
-    except Exception:
-        out = {}
-    if not any(v is not None for v in out.values()):
+
+    def fetch(exch):
+        try:
+            info = yf.Ticker(yf_symbol(symbol, exch)).info or {}
+            out = {f: info.get(f) for f in _FUND_FIELDS}
+            return out if any(v is not None for v in out.values()) else None
+        except Exception:
+            return None
+
+    out = _with_retry(lambda: fetch(exchange))
+    if out is None and not _has_suffix(symbol):
+        out = _with_retry(lambda: fetch(_other_exchange(exchange)))
+    if out is None:
         return {}                       # don't cache failures
     return _store(key, out)
 
@@ -103,42 +136,46 @@ def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
         return cached
 
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    result = {"price": None, "prev_close": None, "change": None,
-              "pct_change": None, "source": None, "ok": False}
 
-    if exchange.upper() == "NSE":
+    def attempt(exch):
+        # NSE live first (real-time) for NSE names
+        if exch.upper() == "NSE":
+            try:
+                from nsepython import nse_eq
+                pi = (nse_eq(sym) or {}).get("priceInfo", {})
+                price = pi.get("lastPrice")
+                if price is not None:
+                    return {"price": float(price),
+                            "prev_close": float(pi["previousClose"]) if pi.get("previousClose") is not None else None,
+                            "change": float(pi["change"]) if pi.get("change") is not None else None,
+                            "pct_change": float(pi["pChange"]) if pi.get("pChange") is not None else None,
+                            "source": "nse", "ok": True}
+            except Exception:
+                pass
+        # yfinance fallback (delayed but dependable)
         try:
-            from nsepython import nse_eq
-            pi = (nse_eq(sym) or {}).get("priceInfo", {})
-            price = pi.get("lastPrice")
+            fi = yf.Ticker(yf_symbol(symbol, exch)).fast_info
+            price = getattr(fi, "last_price", None)
+            prev = getattr(fi, "previous_close", None)
             if price is not None:
-                result.update(
-                    price=float(price),
-                    prev_close=float(pi["previousClose"]) if pi.get("previousClose") is not None else None,
-                    change=float(pi["change"]) if pi.get("change") is not None else None,
-                    pct_change=float(pi["pChange"]) if pi.get("pChange") is not None else None,
-                    source="nse", ok=True)
-                return _store(key, result)
+                change = (price - prev) if prev else None
+                pct = (change / prev * 100) if (prev and change is not None) else None
+                return {"price": float(price),
+                        "prev_close": float(prev) if prev is not None else None,
+                        "change": float(change) if change is not None else None,
+                        "pct_change": float(pct) if pct is not None else None,
+                        "source": "yfinance", "ok": True}
         except Exception:
             pass
+        return None
 
-    try:
-        fi = yf.Ticker(yf_symbol(symbol, exchange)).fast_info
-        price = getattr(fi, "last_price", None)
-        prev = getattr(fi, "previous_close", None)
-        if price is not None:
-            change = (price - prev) if prev else None
-            pct = (change / prev * 100) if (prev and change is not None) else None
-            result.update(
-                price=float(price),
-                prev_close=float(prev) if prev is not None else None,
-                change=float(change) if change is not None else None,
-                pct_change=float(pct) if pct is not None else None,
-                source="yfinance", ok=True)
-            return _store(key, result)
-    except Exception:
-        pass
-    return result                       # don't cache a miss
+    result = _with_retry(lambda: attempt(exchange), attempts=2)
+    if result is None and not _has_suffix(symbol):
+        result = _with_retry(lambda: attempt(_other_exchange(exchange)), attempts=2)
+    if result is None:
+        return {"price": None, "prev_close": None, "change": None,
+                "pct_change": None, "source": None, "ok": False}
+    return _store(key, result)
 
 
 def get_news(symbol: str, exchange: str = "NSE", limit: int = 6) -> list[dict[str, Any]]:

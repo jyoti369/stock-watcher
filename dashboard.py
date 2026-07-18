@@ -367,6 +367,11 @@ with tabs[3]:
             r_sym = rc1.text_input("Symbol", placeholder="TCS").strip().upper()
             r_exch = rc2.selectbox("Exchange", ["NSE", "BSE"], key="rule_exch")
             r_label = rc3.text_input("Label", placeholder="cheap dip to buy-watch")
+            mode_label = st.radio(
+                "When to fire",
+                ["Every check while true (level)", "Only when it crosses into true (edge)"],
+                help="Edge = alert once when the condition first becomes true, not repeatedly while it stays true.")
+            r_mode = "edge" if mode_label.startswith("Only") else "level"
             keys = list(watcher.METRICS.keys())
             conditions = []
             for i in range(3):
@@ -378,7 +383,7 @@ with tabs[3]:
                 if met != "—":
                     conditions.append({"metric": met, "op": op, "value": val})
             if st.form_submit_button("Create rule") and r_sym and conditions:
-                db.add_rule(r_sym, r_exch, r_label or "alert", conditions)
+                db.add_rule(r_sym, r_exch, r_label or "alert", conditions, mode=r_mode)
                 repo_state.export_config()
                 st.toast(f"Rule created for {r_sym}")
                 st.rerun()
@@ -389,7 +394,8 @@ with tabs[3]:
             f"{watcher.METRICS.get(c['metric'], c['metric'])} {c['op']} {c['value']}"
             for c in rule["conditions"])
         cols = st.columns([4, 1, 1])
-        cols[0].write(f"{'🟢' if rule['active'] else '⏸️'} **{rule['symbol']}** — {rule.get('label')}  \n{cond_txt}")
+        mode_tag = " · ⚡edge" if rule.get("mode") == "edge" else ""
+        cols[0].write(f"{'🟢' if rule['active'] else '⏸️'} **{rule['symbol']}** — {rule.get('label')}{mode_tag}  \n{cond_txt}")
         if cols[1].button("Toggle", key=f"tog_{rule['id']}"):
             db.set_rule_active(rule["id"], not rule["active"]); repo_state.export_config(); st.rerun()
         if cols[2].button("Delete", key=f"del_{rule['id']}"):
