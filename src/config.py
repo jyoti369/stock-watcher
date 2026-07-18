@@ -39,6 +39,14 @@ _DEFAULTS = {
         "history_period": "10y",   # how much history to pull from yfinance
         "cache_minutes": 15,       # reuse fetched data within this window
     },
+    # web-search-grounded AI insight layer (optional; feature hidden if no key)
+    "ai": {
+        "provider": "gemini",           # default engine: gemini (free) | openai (paid)
+        "gemini_api_key": "",
+        "openai_api_key": "",
+        "model_gemini": "gemini-flash-latest",
+        "model_openai": "gpt-4o-mini",
+    },
 }
 
 
@@ -66,6 +74,8 @@ def load() -> dict:
         "STOCKWATCH_SMTP_USER": ("email", "username"),
         "STOCKWATCH_SMTP_PASS": ("email", "password"),
         "STOCKWATCH_EMAIL_TO": ("email", "to"),
+        "STOCKWATCH_GEMINI_KEY": ("ai", "gemini_api_key"),
+        "STOCKWATCH_OPENAI_KEY": ("ai", "openai_api_key"),
     }
     for env, (section, key) in env_map.items():
         if os.environ.get(env):

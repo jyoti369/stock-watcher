@@ -97,7 +97,7 @@ _FUND_FIELDS = [
     "profitMargins", "operatingMargins", "revenueGrowth", "earningsGrowth",
     "marketCap", "dividendYield", "beta",
     "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyDayAverage", "twoHundredDayAverage",
-    "currentPrice", "regularMarketPrice", "heldPercentInsiders",
+    "currentPrice", "regularMarketPrice", "heldPercentInsiders", "heldPercentInstitutions",
     # analyst / recommendation data — real inputs for the Suggestions feature
     "targetMeanPrice", "targetHighPrice", "targetLowPrice",
     "recommendationKey", "recommendationMean", "numberOfAnalystOpinions",

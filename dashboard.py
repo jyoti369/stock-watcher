@@ -16,14 +16,15 @@ import streamlit as st
 # BEFORE importing src.config so it picks them up. No-op locally / if unset.
 try:
     for _k in ["STOCKWATCH_TG_TOKEN", "STOCKWATCH_TG_CHAT", "STOCKWATCH_SMTP_USER",
-               "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO", "STOCKWATCH_APP_PASSWORD"]:
+               "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO", "STOCKWATCH_APP_PASSWORD",
+               "STOCKWATCH_GEMINI_KEY", "STOCKWATCH_OPENAI_KEY"]:
         if _k in st.secrets:
             os.environ[_k] = str(st.secrets[_k])
 except Exception:
     pass
 
-from src import (alerts, analysis, bearcase, datasource, db, projection,
-                 repo_state, sectors, suggestions, watcher)
+from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
+                 fundamentals, projection, repo_state, sectors, suggestions, watcher)
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 
@@ -124,6 +125,13 @@ with st.sidebar:
     if st.button("🔔 Run alert check now", width="stretch"):
         fired = watcher.run_once(verbose=False)
         st.toast(f"{len(fired)} alert(s) fired" if fired else "Checked — nothing triggered")
+
+    if st.button("🔄 Refresh data now", width="stretch"):
+        datasource._CACHE.clear()
+        st.cache_data.clear()
+        st.toast("Cleared cache — pulling fresh data")
+        st.rerun()
+    st.caption("Data caches ~15 min; refresh to force fresh prices/fundamentals.")
 
     if st.button("⬆️ Sync watchlist/rules to GitHub", width="stretch"):
         ok, msg = sync_to_github()
@@ -278,6 +286,23 @@ with tabs[2]:
         c3.metric("P/E", f"{vals['pe']:.1f}" if vals.get("pe") else "—")
         c4.metric("1Y return", f"{vals['ret_1y']:+.1f}%" if vals.get("ret_1y") is not None else "—")
 
+        # event/ownership signals
+        extra = fundamentals.extra_signals(picked_sym, picked_exch)
+        f_full = datasource.get_fundamentals(picked_sym, picked_exch)
+        bits = []
+        if extra.get("earnings_date"):
+            bits.append(f"📅 Next earnings: **{extra['earnings_date']}**")
+        if f_full.get("heldPercentInstitutions") is not None:
+            bits.append(f"🏛️ Institutions {f_full['heldPercentInstitutions'] * 100:.0f}%")
+        if f_full.get("heldPercentInsiders") is not None:
+            bits.append(f"👤 Insiders/promoters {f_full['heldPercentInsiders'] * 100:.0f}%")
+        if bits:
+            st.caption(" · ".join(bits))
+        if extra.get("rating_changes"):
+            with st.expander("Recent analyst rating changes"):
+                for rc in extra["rating_changes"]:
+                    st.write(f"• {rc['date']} — {rc['firm']}: {rc['action']} {rc['from']} → {rc['to']}")
+
         if hist is not None and not hist.empty:
             span = st.radio("Range", ["6M", "1Y", "3Y", "Max"], horizontal=True, index=1)
             n = {"6M": 126, "1Y": 252, "3Y": 756, "Max": len(hist)}[span]
@@ -330,6 +355,37 @@ with tabs[2]:
         st.markdown("**⚠️ Bear case — what could go wrong**")
         for f in bear["flags"]:
             st.write(f"• {f}")
+
+        # AI live insight — web-grounded, cited
+        st.markdown("**🤖 Live insight (web-grounded)**")
+        ai_avail = ai_insights.available()
+        if not (ai_avail["gemini"] or ai_avail["openai"]):
+            st.caption("Add a Gemini or OpenAI key in config to enable this.")
+        else:
+            engines = ([("Gemini (free)", "gemini")] if ai_avail["gemini"] else []) + \
+                      ([("OpenAI (paid)", "openai")] if ai_avail["openai"] else [])
+            ec1, ec2 = st.columns([2, 3])
+            eng = ec1.selectbox("Engine", engines, format_func=lambda e: e[0], key="ai_engine")
+            if ec2.button("Generate live insight", key="ai_gen"):
+                with st.spinner("Searching news & summarizing…"):
+                    ctx = (f"price {vals.get('price')}, P/E {vals.get('pe')}, "
+                           f"health {score.get('rating')}, 1Y {vals.get('ret_1y')}%")
+                    st.session_state["ai_result"] = {
+                        "symbol": picked_sym,
+                        "res": ai_insights.generate(picked_sym, ctx, score.get("name"), engine=eng[1])}
+            cached = st.session_state.get("ai_result")
+            if cached and cached.get("symbol") == picked_sym:
+                res = cached["res"]
+                if not res:
+                    st.caption("No AI engine available.")
+                elif res.get("error"):
+                    st.warning(res["error"])
+                else:
+                    st.write(res["text"])
+                    if res.get("sources"):
+                        st.caption("Sources: " + " · ".join(
+                            f"[{i + 1}]({s['url']})" for i, s in enumerate(res["sources"][:6]) if s.get("url")))
+                    st.caption(f"via {res['engine']} — a summary of public news, not advice.")
 
         # probabilistic projection
         st.markdown("**📈 Probabilistic projection**")

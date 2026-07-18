@@ -160,3 +160,44 @@ def deep_metrics(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
         m["eps_history"] = {str(d)[:10]: round(float(v), 2) for d, v in s.items()}
 
     return m
+
+
+def extra_signals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
+    """Extra event-driven signals from yfinance: next earnings date + the most
+    recent analyst rating changes. All optional and often absent for small caps."""
+    key = f"extra:{yf_symbol(symbol, exchange)}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < _TTL:
+        return hit[1]
+
+    out: dict[str, Any] = {"earnings_date": None, "rating_changes": []}
+    try:
+        t = yf.Ticker(yf_symbol(symbol, exchange))
+        try:
+            cal = t.calendar
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if isinstance(ed, (list, tuple)) and ed:
+                    out["earnings_date"] = str(ed[0])[:10]
+                elif ed:
+                    out["earnings_date"] = str(ed)[:10]
+        except Exception:
+            pass
+        try:
+            ud = t.upgrades_downgrades
+            if ud is not None and not ud.empty:
+                for idx, row in ud.sort_index(ascending=False).head(3).iterrows():
+                    out["rating_changes"].append({
+                        "date": str(idx)[:10],
+                        "firm": str(row.get("Firm", "")),
+                        "action": str(row.get("Action", "")),
+                        "to": str(row.get("ToGrade", "")),
+                        "from": str(row.get("FromGrade", "")),
+                    })
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    _CACHE[key] = (time.time(), out)
+    return out
