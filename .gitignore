@@ -2,6 +2,7 @@
 config.yaml
 .streamlit/secrets.toml
 data/*.db
+data/*.pkl
 __pycache__/
 *.pyc
 .DS_Store

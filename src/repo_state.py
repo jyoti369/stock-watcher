@@ -22,6 +22,7 @@ from .config import ROOT
 STATE_DIR = ROOT / "state"
 WATCHLIST_JSON = STATE_DIR / "watchlist.json"
 RULES_JSON = STATE_DIR / "rules.json"
+HOLDINGS_JSON = STATE_DIR / "holdings.json"
 ALERT_STATE_JSON = STATE_DIR / "alert_state.json"
 ALERTS_LOG_JSON = STATE_DIR / "alerts_log.json"
 
@@ -49,6 +50,11 @@ def rule_key(r: dict) -> str:
 
 def export_config() -> None:
     _write(WATCHLIST_JSON, db.get_watchlist())
+    _write(HOLDINGS_JSON, [
+        {"symbol": h["symbol"], "exchange": h["exchange"], "qty": h["qty"],
+         "buy_price": h["buy_price"], "buy_date": h.get("buy_date")}
+        for h in db.get_holdings()
+    ])
     _write(RULES_JSON, [
         {"symbol": r["symbol"], "exchange": r["exchange"], "label": r.get("label"),
          "conditions": r["conditions"], "active": r["active"], "mode": r.get("mode", "level")}
@@ -64,9 +70,14 @@ def import_from_repo() -> None:
     with db.connect() as conn:
         conn.execute("DELETE FROM watchlist")
         conn.execute("DELETE FROM alert_rules")
+        conn.execute("DELETE FROM holdings")
 
     for w in _read(WATCHLIST_JSON, []):
         db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"))
+
+    for h in _read(HOLDINGS_JSON, []):
+        db.add_holding(h["symbol"], h.get("exchange", "NSE"),
+                       h["qty"], h["buy_price"], h.get("buy_date"))
 
     saved = _read(ALERT_STATE_JSON, {})
     for r in _read(RULES_JSON, []):

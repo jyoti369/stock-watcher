@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -24,8 +25,11 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, projection, repo_state, sectors, suggestions,
-                 verdict, watcher)
+                 fundamentals, portfolio, projection, repo_state, sectors,
+                 suggestions, verdict, watcher)
+from src.config import DATA_DIR
+
+SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 
@@ -71,7 +75,8 @@ def sync_to_github() -> tuple[bool, str]:
     commits (different files) merge cleanly."""
     repo_state.export_config()
     try:
-        subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json"],
+        subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
+                        "state/holdings.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -84,6 +89,18 @@ def sync_to_github() -> tuple[bool, str]:
         return True, "pushed to GitHub"
     except subprocess.CalledProcessError as e:
         return False, (e.stderr or b"").decode()[:200] if isinstance(e.stderr, bytes) else str(e)
+
+
+def auto_sync() -> None:
+    """Export state and quietly push to GitHub so the 24/7 watcher stays current.
+    Stops retrying after the first failure this session (e.g. on Streamlit Cloud,
+    where the checkout can't push) — the manual sidebar button stays as fallback."""
+    repo_state.export_config()
+    if st.session_state.get("_autosync_dead"):
+        return
+    ok, _ = sync_to_github()
+    if not ok:
+        st.session_state["_autosync_dead"] = True
 
 
 def monte_carlo_block(symbol, exchange, years, amount, period_label):
@@ -115,7 +132,7 @@ with st.sidebar:
             new_exch = st.selectbox("Exchange", ["NSE", "BSE"])
             if st.form_submit_button("Add", width="stretch") and new_sym:
                 db.add_to_watchlist(new_sym, new_exch, datasource.resolve_name(new_sym, new_exch))
-                repo_state.export_config()
+                auto_sync()
                 st.toast(f"Added {new_sym}")
                 st.rerun()
 
@@ -141,7 +158,8 @@ with st.sidebar:
 
 
 watchlist = db.get_watchlist()
-tabs = st.tabs(["📋 Overview", "💡 Suggestions", "🔍 Stock analysis", "🔔 Alerts"])
+tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
+                "🔍 Stock analysis", "🔔 Alerts"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -181,11 +199,89 @@ with tabs[0]:
                 c1.write(f"{w['symbol']} · {w['exchange']} — {w.get('name','')}")
                 if c2.button("Remove", key=f"rm_{w['symbol']}_{w['exchange']}"):
                     db.remove_from_watchlist(w["symbol"], w["exchange"])
-                    repo_state.export_config()
+                    auto_sync()
+                    st.rerun()
+
+# =============================================================== portfolio
+with tabs[1]:
+    st.subheader("💼 Portfolio")
+    st.caption("What you actually hold, with live profit & loss. Add each buy below — "
+               "the same stock bought twice shows as two lots.")
+
+    with st.expander("➕ Add a holding", expanded=not db.get_holdings()):
+        with st.form("add_holding", clear_on_submit=True):
+            h1, h2, h3, h4, h5 = st.columns([1.4, 1, 1, 1, 1.2])
+            h_sym = h1.text_input("Symbol", placeholder="TCS").strip().upper()
+            h_exch = h2.selectbox("Exchange", ["NSE", "BSE"], key="h_exch")
+            h_qty = h3.number_input("Qty", min_value=0.0, value=10.0, step=1.0)
+            h_price = h4.number_input("Buy price (₹)", min_value=0.0, value=0.0, step=1.0)
+            h_date = h5.date_input("Buy date", value=None, format="DD/MM/YYYY")
+            if st.form_submit_button("Add holding") and h_sym and h_qty > 0 and h_price > 0:
+                db.add_holding(h_sym, h_exch, h_qty, h_price,
+                               h_date.isoformat() if h_date else None)
+                auto_sync()
+                st.toast(f"Added {h_qty:g} × {h_sym} @ ₹{h_price:g}")
+                st.rerun()
+
+    holdings = db.get_holdings()
+    if not holdings:
+        st.info("No holdings yet. Add what you own above — then this page shows your live "
+                "P&L, today's move, and each stock's health at a glance.")
+    else:
+        lot_rows, rows = [], []
+        for h in holdings:
+            v = watcher.gather_values(h["symbol"], h["exchange"])
+            s = analysis.score_fundamentals(h["symbol"], h["exchange"])
+            lot = portfolio.lot_row(h, v)
+            lot_rows.append(lot)
+            rows.append({
+                "Symbol": lot["symbol"], "Qty": lot["qty"], "Buy ₹": lot["buy_price"],
+                "Now ₹": lot["price"], "Day %": lot["day_pct"],
+                "Invested": lot["invested"], "Value": lot["value"],
+                "P&L": lot["pnl"], "P&L %": lot["pnl_pct"],
+                "Health": RATING_BADGE.get(s.get("rating"), "⚪ —"),
+            })
+
+        tot = portfolio.totals(lot_rows)
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("Invested", inr(tot["invested"]))
+        t2.metric("Current value", inr(tot["value"]),
+                  f"{tot['pnl_pct']:+.1f}%" if tot["pnl_pct"] is not None else None)
+        t3.metric("Total P&L", inr(tot["pnl"]), "profit" if tot["pnl"] >= 0 else "loss")
+        t4.metric("Today", inr(tot["day_move"]),
+                  f"{tot['day_pct']:+.2f}%" if tot["day_pct"] is not None else None)
+        if tot["missing"]:
+            st.warning(f"{tot['missing']} holding(s) had no live price this run — totals "
+                       "exclude them. Hit 🔄 Refresh data in the sidebar.")
+
+        pdf = pd.DataFrame(rows)
+
+        def _pl_color(x):
+            if isinstance(x, (int, float)):
+                return "color: #4ade80" if x > 0 else "color: #fb7185" if x < 0 else ""
+            return ""
+
+        st.dataframe(
+            pdf.style.map(_pl_color, subset=["Day %", "P&L", "P&L %"])
+               .format({"Qty": "{:g}", "Buy ₹": "₹{:,.2f}", "Now ₹": "₹{:,.2f}",
+                        "Day %": "{:+.2f}%", "Invested": "₹{:,.0f}", "Value": "₹{:,.0f}",
+                        "P&L": "₹{:+,.0f}", "P&L %": "{:+.1f}%"}, na_rep="—"),
+            width="stretch", hide_index=True)
+        st.caption("P&L is vs your buy price (dividends not counted). Health = the business "
+                   "quality read — open **Stock analysis** for the full picture + bottom line.")
+
+        with st.expander("⚙️ Manage holdings"):
+            for h in holdings:
+                c1, c2 = st.columns([4, 1])
+                bd = f" · bought {h['buy_date']}" if h.get("buy_date") else ""
+                c1.write(f"{h['qty']:g} × **{h['symbol']}** @ ₹{h['buy_price']:g}{bd}")
+                if c2.button("Remove", key=f"rmh_{h['id']}"):
+                    db.remove_holding(h["id"])
+                    auto_sync()
                     st.rerun()
 
 # ============================================================= suggestions
-with tabs[1]:
+with tabs[2]:
     st.subheader("💡 Suggestions")
     st.caption("Ranked by an opportunity score from **real data** — fundamental health, "
                "distance below analysts' target, and trend. Each pick is then deep-checked "
@@ -208,9 +304,30 @@ with tabs[1]:
             st.warning("Your watchlist is empty — pick 'Popular large-caps' or 'Both'.")
         else:
             with st.spinner(f"Scoring {len(set(uni))} stocks, then deep-checking the top {top_n}…"):
-                st.session_state["suggestions"] = suggestions.rank(uni, top_n=top_n)
+                ranked_now = suggestions.rank(uni, top_n=top_n)
+                st.session_state["suggestions"] = ranked_now
+                st.session_state["suggestions_ts"] = datetime.now().strftime("%d %b, %H:%M")
+                try:                       # persist so the next visit is instant
+                    import pickle
+                    SUGG_CACHE.write_bytes(pickle.dumps(
+                        {"ts": st.session_state["suggestions_ts"], "rows": ranked_now}))
+                except Exception:
+                    pass
+
+    # no scan this session? show the last saved one instantly
+    if "suggestions" not in st.session_state and SUGG_CACHE.exists():
+        try:
+            import pickle
+            cached_scan = pickle.loads(SUGG_CACHE.read_bytes())
+            st.session_state["suggestions"] = cached_scan["rows"]
+            st.session_state["suggestions_ts"] = cached_scan["ts"]
+        except Exception:
+            pass
 
     ranked = st.session_state.get("suggestions", [])
+    if ranked and st.session_state.get("suggestions_ts"):
+        st.caption(f"Showing scan from **{st.session_state['suggestions_ts']}** — "
+                   "prices/news may have moved since; hit **Find suggestions** to rescan.")
     if ranked:
         st.info("Candidates to research, **not** advice. Profit figures are probability "
                 "ranges from past behaviour — never guaranteed. Check before you buy.")
@@ -287,7 +404,7 @@ with tabs[1]:
                    "Takes ~30–60s — it scores every stock live, then deep-checks the top picks.")
 
 # ============================================================ stock detail
-with tabs[2]:
+with tabs[3]:
     st.subheader("🔍 Stock analysis")
     options = [f"{w['symbol']} · {w['exchange']}" for w in watchlist]
     manual = st.text_input("Type any symbol", placeholder="e.g. HDFCBANK").strip().upper()
@@ -481,7 +598,7 @@ with tabs[2]:
         st.caption("⚠️ " + v["caveat"] + " " + score.get("disclaimer", ""))
 
 # ================================================================= alerts
-with tabs[3]:
+with tabs[4]:
     st.subheader("🔔 Alert rules")
     st.caption("Pick a stock, see its live numbers, and add an alert in one click. "
                "Alerts ping your Telegram + email 24/7.")
@@ -498,7 +615,7 @@ with tabs[3]:
 
         def _make(label, conditions, mode="edge"):
             db.add_rule(a_sym, a_exch, label, conditions, mode=mode)
-            repo_state.export_config()
+            auto_sync()
             st.toast(f"Alert added — {a_sym}: {label}")
             st.rerun()
 
@@ -564,13 +681,15 @@ with tabs[3]:
                                 conditions.append({"metric": met, "op": op, "value": dv})
                         if st.form_submit_button("Create rule") and conditions:
                             db.add_rule(a_sym, a_exch, r_label or "alert", conditions, mode=r_mode)
-                            repo_state.export_config()
+                            auto_sync()
                             st.toast(f"Rule created for {a_sym}")
                             st.rerun()
 
     rules = db.get_rules(active_only=False)
     if rules:
-        st.caption("**Pause** silences an alert without deleting it; **Resume** turns it back on.")
+        st.caption("**Pause** silences an alert without deleting it; **Resume** turns it back on. "
+                   "The line under each rule shows how close it is to firing right now.")
+    _rule_vals: dict[str, dict] = {}
     for rule in rules:
         cond_txt = " AND ".join(
             f"{watcher.METRICS.get(c['metric'], c['metric'])} {c['op']} {c['value']}"
@@ -578,16 +697,38 @@ with tabs[3]:
         active = bool(rule["active"])
         mode_tag = " · ⚡ edge" if rule.get("mode") == "edge" else ""
         status = "🟢 Active" if active else "⏸️ Paused"
+
+        # near-fire preview: current value of each condition vs its target
+        vkey = f"{rule['symbol']}:{rule['exchange']}"
+        if vkey not in _rule_vals:
+            _rule_vals[vkey] = watcher.gather_values(rule["symbol"], rule["exchange"])
+        vals_now = _rule_vals[vkey]
+        parts, n_met = [], 0
+        for c in rule["conditions"]:
+            cur = vals_now.get(c["metric"])
+            label = watcher.METRICS.get(c["metric"], c["metric"])
+            if cur is None:
+                parts.append(f"{label}: no data")
+                continue
+            met = watcher.OPS[c["op"]](cur, float(c["value"]))
+            n_met += met
+            gap = abs(cur - float(c["value"]))
+            state_txt = "✓ met" if met else f"needs {c['op']} {c['value']:g}, off by {gap:g}"
+            parts.append(f"{label} is {cur:g} ({state_txt})")
+        n_cond = len(rule["conditions"])
+        prox = "🔥 firing" if n_met == n_cond else f"{n_met}/{n_cond} conditions met"
+
         cols = st.columns([5, 1, 1])
         cols[0].write(f"{status} · **{rule['symbol']}** — {rule.get('label')}{mode_tag}  \n{cond_txt}")
+        cols[0].caption(f"Now: {prox} — " + "; ".join(parts))
         if cols[1].button("Pause" if active else "Resume", key=f"tog_{rule['id']}"):
             db.set_rule_active(rule["id"], not active)
-            repo_state.export_config()
+            auto_sync()
             st.toast(("Paused" if active else "Resumed") + f" — {rule['symbol']}")
             st.rerun()
         if cols[2].button("Delete", key=f"del_{rule['id']}"):
             db.delete_rule(rule["id"])
-            repo_state.export_config()
+            auto_sync()
             st.toast(f"Deleted — {rule['symbol']}")
             st.rerun()
     if not rules:

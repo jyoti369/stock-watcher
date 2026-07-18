@@ -6,8 +6,8 @@ tweaks can't silently change the numbers the app reports.
 import numpy as np
 import pandas as pd
 
-from src import (analysis, fundamentals, projection, repo_state, sectors,
-                 suggestions, verdict, watcher)
+from src import (analysis, fundamentals, portfolio, projection, repo_state,
+                 sectors, suggestions, verdict, watcher)
 
 
 def _price_df(prices):
@@ -116,6 +116,21 @@ def test_verdict_quality_and_price():
     v2 = verdict.build({"rating": "Weak", "score": 20, "deep": {}}, {"price_vs_ma200": -5},
                        {"percentile": 85, "current_pe": 40, "median_pe": 20, "min_pe": 10, "max_pe": 45}, None)
     assert "high-risk" in v2["stance"].lower() or "weak" in v2["stance"].lower()
+
+
+def test_portfolio_pnl():
+    h = {"symbol": "TCS", "qty": 10, "buy_price": 2000.0}
+    lot = portfolio.lot_row(h, {"price": 2200.0, "pct_change_day": 1.0})
+    assert lot["invested"] == 20000 and lot["value"] == 22000
+    assert lot["pnl"] == 2000 and round(lot["pnl_pct"], 1) == 10.0
+
+    # missing price -> lot excluded from totals, counted as missing
+    lot2 = portfolio.lot_row({"symbol": "X", "qty": 5, "buy_price": 100.0}, {"price": None})
+    tot = portfolio.totals([lot, lot2])
+    assert tot["invested"] == 20500 and tot["value"] == 22000
+    assert tot["pnl"] == 2000 and tot["missing"] == 1
+    # today's move: 22000 value at +1% day -> ~217.8 rupees
+    assert abs(tot["day_move"] - (22000 - 22000 / 1.01)) < 0.01
 
 
 def test_rule_key_stable_and_distinct():

@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     last_state       INTEGER           -- last evaluation (1/0), for edge detection
 );
 
+CREATE TABLE IF NOT EXISTS holdings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol     TEXT NOT NULL,
+    exchange   TEXT NOT NULL DEFAULT 'NSE',
+    qty        REAL NOT NULL,
+    buy_price  REAL NOT NULL,
+    buy_date   TEXT,
+    added_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS alert_history (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_id    INTEGER,
@@ -167,6 +177,30 @@ def set_last_state(rule_id: int, state: bool) -> None:
 def set_last_triggered(rule_id: int, iso: str) -> None:
     with connect() as conn:
         conn.execute("UPDATE alert_rules SET last_triggered=? WHERE id=?", (iso, rule_id))
+
+
+# ---- holdings (portfolio) -------------------------------------------------
+
+def add_holding(symbol: str, exchange: str, qty: float, buy_price: float,
+                buy_date: str | None = None) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO holdings(symbol, exchange, qty, buy_price, buy_date, added_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (symbol.upper(), exchange.upper(), qty, buy_price, buy_date, now_iso()),
+        )
+        return cur.lastrowid
+
+
+def get_holdings() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM holdings ORDER BY symbol, buy_date").fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_holding(holding_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,))
 
 
 # ---- alert history -------------------------------------------------------
