@@ -6,7 +6,8 @@ tweaks can't silently change the numbers the app reports.
 import numpy as np
 import pandas as pd
 
-from src import analysis, fundamentals, projection, repo_state, sectors, suggestions, watcher
+from src import (analysis, fundamentals, projection, repo_state, sectors,
+                 suggestions, verdict, watcher)
 
 
 def _price_df(prices):
@@ -100,6 +101,21 @@ def test_sector_lookup():
 def test_analyst_view():
     assert suggestions.analyst_view({"targetMeanPrice": 120}, 100)["upside_pct"] == 20.0
     assert suggestions.analyst_view({}, 100) is None
+
+
+def test_verdict_quality_and_price():
+    # OK-rated + expensive vs peers -> "priced richly" stance, always with points + caveat
+    score = {"rating": "OK", "score": 80, "deep": {"q_earnings_yoy": 5}}
+    metrics = {"price_vs_ma200": 4, "rsi14": 55}
+    peer = {"verdict": {"pe": "pricier than peers"}}
+    v = verdict.build(score, metrics, None, peer)
+    assert "rich" in v["stance"].lower()
+    assert v["points"] and v["watch"] and v["caveat"]
+
+    # Weak + expensive -> high-risk phrasing
+    v2 = verdict.build({"rating": "Weak", "score": 20, "deep": {}}, {"price_vs_ma200": -5},
+                       {"percentile": 85, "current_pe": 40, "median_pe": 20, "min_pe": 10, "max_pe": 45}, None)
+    assert "high-risk" in v2["stance"].lower() or "weak" in v2["stance"].lower()
 
 
 def test_rule_key_stable_and_distinct():

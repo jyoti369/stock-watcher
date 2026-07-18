@@ -24,7 +24,8 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, projection, repo_state, sectors, suggestions, watcher)
+                 fundamentals, projection, repo_state, sectors, suggestions,
+                 verdict, watcher)
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 
@@ -275,17 +276,37 @@ with tabs[2]:
         score = analysis.score_fundamentals(picked_sym, picked_exch, deep=True)
         vals = watcher.gather_values(picked_sym, picked_exch)
         hist = datasource.get_history(picked_sym, picked_exch)
+        val = bearcase.valuation_percentile(picked_sym, picked_exch)
+        peer = sectors.peer_comparison(picked_sym, picked_exch)
 
         st.markdown(f"### {score.get('name', picked_sym)}  ·  {picked_sym}")
         if score.get("sector"):
             st.caption(f"Sector: {score['sector']}")
 
+        with st.expander("❓ New here? How to read this page"):
+            st.markdown(
+                "- **Health** — a plain read of the company's finances: 🟢 OK (solid), "
+                "🟡 Mixed (some yellow flags), 🔴 Weak (red flags). It's about the *business*, "
+                "not the price — a healthy company can still be expensive.\n"
+                "- **Valuation vs history / peers** — is the P/E high or low vs its own past and its "
+                "sector? High = a lot of optimism already priced in.\n"
+                "- **Bear case** — the honest 'what could go wrong', from the numbers.\n"
+                "- **Probabilistic projection** — a range of outcomes from simulating its own past "
+                "moves, with the odds. Not a prediction.\n"
+                "- **Signal backtest** — did a trading rule actually work on this stock historically?\n"
+                "- **AI live insight** — a summary of recent news, with sources.\n"
+                "- **Bottom line** (at the end) — all of it in one plain takeaway.")
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Price", inr(vals.get("price")),
                   f"{vals['pct_change_day']:+.2f}%" if vals.get("pct_change_day") is not None else None)
         c2.metric("Deep health", RATING_BADGE.get(score.get("rating"), "—"),
-                  f"{score.get('score')}/100" if score.get("score") is not None else None)
-        c3.metric("P/E", f"{vals['pe']:.1f}" if vals.get("pe") else "—")
+                  f"{score.get('score')}/100" if score.get("score") is not None else None,
+                  help="🟢 OK = financials look solid · 🟡 Mixed = some yellow flags · 🔴 Weak = "
+                       "multiple red flags. Scores the business, not the price — a healthy company "
+                       "can still be overpriced. See the Bottom line for what it means together.")
+        c3.metric("P/E", f"{vals['pe']:.1f}" if vals.get("pe") else "—",
+                  help="Price ÷ earnings per share. Higher = the market expects more growth.")
         c4.metric("1Y return", f"{vals['ret_1y']:+.1f}%" if vals.get("ret_1y") is not None else "—")
 
         # event/ownership signals
@@ -336,8 +357,7 @@ with tabs[2]:
             for k, v in (score.get("history_context") or {}).items():
                 st.write(f"{k.replace('_', ' ').title()}: {v}")
 
-        # valuation vs its own history
-        val = bearcase.valuation_percentile(picked_sym, picked_exch)
+        # valuation vs its own history (computed once, up top)
         if val:
             st.markdown("**Valuation vs its own 5-year history**")
             st.progress(min(val["percentile"], 100) / 100)
@@ -346,8 +366,7 @@ with tabs[2]:
                        f"({val['min_pe']}–{val['max_pe']}, median {val['median_pe']}) — {val['verdict']}. "
                        f"This is a different lens from the headline trailing P/E above.")
 
-        # peers
-        peer = sectors.peer_comparison(picked_sym, picked_exch)
+        # peers (computed once, up top)
         if peer:
             st.markdown(f"**Peer comparison · {peer['group']}**")
             df = pd.DataFrame(peer["peers"]).rename(columns={
@@ -403,7 +422,14 @@ with tabs[2]:
 
         # backtest
         st.markdown("**🔬 Signal backtest** — did a rule actually work on this stock?")
-        sig = st.selectbox("Signal", list(projection.PRESETS.keys()))
+        sig = st.selectbox(
+            "Signal", list(projection.PRESETS.keys()),
+            help="A 'signal' is a classic buy-timing trigger. This replays it across years of this "
+                 "stock's history and shows what returns actually followed. "
+                 "RSI oversold (<30) = beaten-down bounce setups · Dip 10% below 50-day avg = pullback "
+                 "buys · Golden cross = when the 50-day average crosses above the 200-day (a trend "
+                 "turning up). If the 'avg after signal' beats the any-day average with a high win "
+                 "rate, the signal has had an edge on this stock.")
         bt = projection.backtest(hist, sig)
         if bt:
             st.write(f"Fired **{bt['num_signals']}** times over ~{bt['years']}y. "
@@ -417,7 +443,15 @@ with tabs[2]:
         else:
             st.caption("Not enough history to backtest this signal.")
 
-        st.caption("⚠️ " + score.get("disclaimer", ""))
+        # bottom line — plain synthesis of everything above
+        st.markdown("---")
+        v = verdict.build(score, vals, val, peer)
+        st.markdown("### 📌 Bottom line")
+        st.markdown(f"**{v['stance']}**")
+        for p in v["points"]:
+            st.markdown(f"- {p}")
+        st.markdown(f"**What would make it more interesting:** {v['watch']}")
+        st.caption("⚠️ " + v["caveat"] + " " + score.get("disclaimer", ""))
 
 # ================================================================= alerts
 with tabs[3]:
