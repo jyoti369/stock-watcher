@@ -171,8 +171,9 @@ with tabs[0]:
                   .format({"Price": "₹{:,.2f}", "Day %": "{:+.2f}%", "1Y %": "{:+.1f}%",
                            "P/E": "{:.1f}", "ROE %": "{:.1f}%", "RSI": "{:.0f}"}, na_rep="—"))
         st.dataframe(styled, width="stretch", hide_index=True)
-        st.caption("Health here is the quick read. Open **Stock analysis** for the deep, "
-                   "statement-based view. Prices via NSE live where available, else ~15-min delayed.")
+        st.caption("**Health** = share of fundamental checks passed: 65+ 🟢 OK · 40–64 🟡 Mixed · "
+                   "<40 🔴 Weak — about the business, not the price. Open **Stock analysis** for "
+                   "the deep view + bottom line. Prices via NSE live where available, else ~15-min delayed.")
 
         with st.expander("⚙️ Manage watchlist"):
             for w in watchlist:
@@ -213,6 +214,16 @@ with tabs[1]:
     if ranked:
         st.info("Candidates to research, **not** advice. Profit figures are probability "
                 "ranges from past behaviour — never guaranteed. Check before you buy.")
+        with st.expander("❓ What do these scores mean?"):
+            st.markdown(
+                "- **Opportunity (0–100)** — how well things line up *right now*, used to rank this "
+                "list. Blend of: fundamental health 40% · upside to analysts' target 30% · trend vs "
+                "200-day average 20% · not-overbought 10%. A ranking aid, not a buy signal.\n"
+                "- **Health (0–100)** — how good the *business* is: the share of fundamental checks "
+                "it passes (profitability, debt, cash flow, growth, earnings quality…). "
+                "**65+ 🟢 OK · 40–64 🟡 Mixed · below 40 🔴 Weak.** Says nothing about price — "
+                "a great business can still be expensive.\n"
+                "- **Bottom line** — one honest sentence combining quality, valuation and trend.")
 
         for i, r in enumerate(ranked, 1):
             av = r["analyst"]
@@ -221,13 +232,23 @@ with tabs[1]:
             header = (f"#{i}  {r['symbol']} · {r['name'][:32]}  —  opportunity {r['score']}/100  "
                       f"·  health {hlth['rating']}  ·  {rec}")
             with st.expander(header, expanded=(i == 1)):
+                # one-line bottom line, synthesised from the already-computed pieces
+                v = verdict.build(hlth, r.get("metrics", {}),
+                                  (r.get("bear") or {}).get("valuation"), r.get("peer"))
+                st.markdown(f"📌 **{v['stance']}**")
+
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Opportunity", f"{r['score']}/100")
+                m1.metric("Opportunity", f"{r['score']}/100",
+                          help="How well things line up right now (ranking aid, not a buy signal): "
+                               "health 40% + analyst upside 30% + trend 20% + not-overbought 10%.")
                 m2.metric("Deep health", RATING_BADGE.get(hlth["rating"], "—"),
-                          f"{hlth.get('score')}/100" if hlth.get("score") is not None else None)
+                          f"{hlth.get('score')}/100" if hlth.get("score") is not None else None,
+                          help="Share of fundamental checks passed. 65+ 🟢 OK · 40–64 🟡 Mixed · "
+                               "<40 🔴 Weak. About the business, not the price.")
                 m3.metric("Price", inr(r["price"]))
                 if av:
-                    m4.metric("Analyst target", inr(av["target"]), f"{av['upside_pct']:+.1f}%")
+                    m4.metric("Analyst target", inr(av["target"]), f"{av['upside_pct']:+.1f}%",
+                              help="Average 12-month target of the analysts covering it, vs price now.")
 
                 st.markdown(f"**✅ Why it's on the list** — sector: {r.get('sector') or '—'}")
                 for c in hlth.get("checks", []):
@@ -259,7 +280,11 @@ with tabs[1]:
                         meta = " · ".join(x for x in [n.get("publisher"), n.get("date")] if x)
                         st.write(f"• {n['title']}" + (f"  \n  _{meta}_" if meta else ""))
     elif "suggestions" in st.session_state:
-        st.info("No stocks scored — try a different universe.")
+        st.info("No stocks scored — the data source may be rate-limiting. "
+                "Hit 🔄 Refresh data in the sidebar and try again.")
+    else:
+        st.caption("👆 Pick a universe, period and amount, then hit **Find suggestions**. "
+                   "Takes ~30–60s — it scores every stock live, then deep-checks the top picks.")
 
 # ============================================================ stock detail
 with tabs[2]:
@@ -285,8 +310,9 @@ with tabs[2]:
 
         with st.expander("❓ New here? How to read this page"):
             st.markdown(
-                "- **Health** — a plain read of the company's finances: 🟢 OK (solid), "
-                "🟡 Mixed (some yellow flags), 🔴 Weak (red flags). It's about the *business*, "
+                "- **Health (0–100)** — the share of fundamental checks the company passes "
+                "(profitability, debt, cash flow, growth, earnings quality…): "
+                "**65+ 🟢 OK · 40–64 🟡 Mixed · below 40 🔴 Weak**. It's about the *business*, "
                 "not the price — a healthy company can still be expensive.\n"
                 "- **Valuation vs history / peers** — is the P/E high or low vs its own past and its "
                 "sector? High = a lot of optimism already priced in.\n"
@@ -302,9 +328,10 @@ with tabs[2]:
                   f"{vals['pct_change_day']:+.2f}%" if vals.get("pct_change_day") is not None else None)
         c2.metric("Deep health", RATING_BADGE.get(score.get("rating"), "—"),
                   f"{score.get('score')}/100" if score.get("score") is not None else None,
-                  help="🟢 OK = financials look solid · 🟡 Mixed = some yellow flags · 🔴 Weak = "
-                       "multiple red flags. Scores the business, not the price — a healthy company "
-                       "can still be overpriced. See the Bottom line for what it means together.")
+                  help="Share of fundamental checks passed (profitability, debt, cash flow, growth, "
+                       "earnings quality…). 65+ 🟢 OK · 40–64 🟡 Mixed · below 40 🔴 Weak. "
+                       "Scores the business, not the price — a healthy company can still be "
+                       "overpriced. See the Bottom line for what it means together.")
         c3.metric("P/E", f"{vals['pe']:.1f}" if vals.get("pe") else "—",
                   help="Price ÷ earnings per share. Higher = the market expects more growth.")
         c4.metric("1Y return", f"{vals['ret_1y']:+.1f}%" if vals.get("ret_1y") is not None else "—")
