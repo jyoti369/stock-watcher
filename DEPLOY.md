@@ -1,77 +1,87 @@
-# Deploying Stock Watcher (always-on)
+# Deploying Stock Watcher
 
-The goal: one small always-on container that runs **both** the dashboard and the
-24/7 alert watcher, with a persistent database and a URL you can open anywhere.
-The `Dockerfile` is host-agnostic, so any container host works — instructions
-below are for **Fly.io** (good free-ish tier, Singapore region close to India).
+Your setup: **alerts run 24/7 on GitHub Actions** (no machine of yours stays on,
+no card), and you **run the dashboard locally** when you want to browse or change
+your watchlist. This is the primary path below. A fully-hosted container option
+(Fly.io / any Docker host) is kept at the end as an alternative.
 
-## What runs where
+---
 
-- `entrypoint.sh` starts `src.scheduler` (the alert watcher loop) in the background
-  and `dashboard.py` (Streamlit) in the foreground.
-- SQLite lives on a mounted volume at `/app/data` so your watchlist, rules and
-  alert history survive redeploys.
-- Secrets (Telegram token, Gmail app password) are set as **environment variables /
-  Fly secrets**, never committed.
+## Primary: 24/7 alerts on GitHub Actions + local dashboard
 
-## Fly.io
+### How it fits together
+- The **local dashboard** is your control panel. When you add a stock or an alert
+  rule, it writes `state/watchlist.json` and `state/rules.json`. Hit **“⬆️ Sync
+  watchlist/rules to GitHub”** in the sidebar (or `git push`) to publish them.
+- The **GitHub Action** (`.github/workflows/alerts.yml`) wakes up every 30 min
+  during NSE market hours, reads that state, checks your rules, and messages you
+  on Telegram / email. It writes cooldown state back to `state/alert_state.json`
+  so you never get spammed. No computer of yours is involved.
 
-1. Install the CLI and log in (needs a Fly account; a card is required even for the
-   free allowance):
+### One-time setup
+
+1. **Create a Telegram bot** (for instant phone alerts)
+   - In Telegram, message **@BotFather** → `/newbot` → it gives you a **token**.
+   - Message your new bot once (say “hi”), then open
+     `https://api.telegram.org/bot<token>/getUpdates` in a browser and copy the
+     `chat.id` number.
+
+2. **Create a Gmail app password** (for email alerts)
+   - Google Account → Security → 2-Step Verification → **App passwords** → generate
+     one for “Mail”. Use that 16-char password (not your login password).
+
+3. **Add them as repo secrets** — in the GitHub repo:
+   Settings → Secrets and variables → Actions → **New repository secret**. Add the
+   ones you want (Telegram, email, or both):
+   ```
+   STOCKWATCH_TG_TOKEN     = 123456:ABC...
+   STOCKWATCH_TG_CHAT      = 987654321
+   STOCKWATCH_SMTP_USER    = you@gmail.com
+   STOCKWATCH_SMTP_PASS    = your-gmail-app-password
+   STOCKWATCH_EMAIL_TO     = you@gmail.com
+   ```
+   Or from the terminal:
    ```bash
-   brew install flyctl
-   fly auth login
+   gh secret set STOCKWATCH_TG_TOKEN
+   gh secret set STOCKWATCH_TG_CHAT
+   # …and so on (it prompts for each value; nothing is stored in the repo)
    ```
 
-2. From the project root, pick a unique app name and create the app + volume:
-   ```bash
-   fly launch --no-deploy --name stock-watcher-jyoti --region sin
-   fly volumes create stockdata --region sin --size 1
-   ```
-   (`fly launch` will notice the existing `fly.toml` and `Dockerfile`.)
+4. **Test it** — GitHub repo → **Actions** tab → “alert-watcher” → **Run workflow**.
+   Watch the run; if a rule’s conditions are met you’ll get the alert. It also runs
+   automatically every 30 min in market hours after this.
 
-3. Set your secrets (only the channels you use):
-   ```bash
-   fly secrets set \
-     STOCKWATCH_TG_TOKEN="123456:abc..." \
-     STOCKWATCH_TG_CHAT="your_chat_id" \
-     STOCKWATCH_SMTP_USER="you@gmail.com" \
-     STOCKWATCH_SMTP_PASS="gmail_app_password" \
-     STOCKWATCH_EMAIL_TO="you@gmail.com"
-   ```
+### Managing your watchlist / rules
+Run the dashboard locally, make changes, then click **Sync to GitHub**:
+```bash
+./.venv/bin/streamlit run dashboard.py
+```
+The Action picks up the new state on its next run.
 
-4. Deploy:
-   ```bash
-   fly deploy
-   ```
-   `fly open` opens the dashboard URL. `fly logs` tails both the dashboard and the
-   watcher (you'll see `[scheduler]` lines every 15 min).
+### Cost
+Scheduling only during market hours (weekdays, ~03:00–10:00 UTC) keeps this well
+inside the free GitHub Actions minutes for a private repo (~2000/month).
 
-### Keeping it private (recommended for a personal tool)
-Fly apps are reachable by URL but not indexed. To require login, put it behind
-[Fly's `tls`/OIDC or a simple auth proxy], or add a password gate in Streamlit
-(`st.text_input(type="password")` check) — ask and I'll wire one in.
+---
 
-## Test the container locally first (Docker)
+## Alternative: fully-hosted container (Fly.io / Docker)
+
+If you later get an international card, the same code runs as one always-on
+container serving **both** the dashboard and the watcher.
 
 ```bash
 docker build -t stock-watcher .
-docker run --rm -p 8080:8080 \
-  -e STOCKWATCH_TG_TOKEN=... -e STOCKWATCH_TG_CHAT=... \
-  -v "$PWD/data:/app/data" \
-  stock-watcher
-# open http://localhost:8080
+docker run --rm -p 8080:8080 -v "$PWD/data:/app/data" \
+  -e STOCKWATCH_TG_TOKEN=... -e STOCKWATCH_TG_CHAT=... stock-watcher
+# http://localhost:8080
 ```
 
-## Other hosts
-
-The same `Dockerfile` deploys to **Railway**, **Koyeb**, or **Render** — create a
-service from the repo, add the `STOCKWATCH_*` env vars, attach a volume at
-`/app/data`, and expose port 8080. On hosts whose free tier sleeps on idle, the
-24/7 watcher won't fire while asleep — use a plan that stays running.
+For Fly.io: `brew install flyctl && fly auth login`, then `fly launch` (uses the
+included `fly.toml` + `Dockerfile`), `fly volumes create stockdata`, set secrets
+with `fly secrets set …`, and `fly deploy`. Note Fly requires a card even on the
+free allowance. Any Docker host (Railway, Koyeb, Render) works the same way.
 
 ## Data-source note
-
-From a cloud IP, NSE's live-quote endpoint (nsepython) is often blocked, so quotes
-fall back to yfinance (~15-min delayed). Fundamentals, scoring, suggestions and
-alerts all work fine from the cloud; only the real-time tick may be delayed.
+From a cloud/GitHub IP, NSE’s live-quote endpoint is often blocked, so quotes fall
+back to yfinance (~15-min delayed). Fundamentals, scoring, suggestions and alerts
+all work fine; only the real-time tick may be delayed.

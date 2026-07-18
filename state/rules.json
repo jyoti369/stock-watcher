@@ -1,0 +1,28 @@
+[
+  {
+    "symbol": "TCS",
+    "exchange": "NSE",
+    "label": "oversold watch",
+    "conditions": [
+      {
+        "metric": "rsi14",
+        "op": "<",
+        "value": 35
+      }
+    ],
+    "active": 1
+  },
+  {
+    "symbol": "INFY",
+    "exchange": "NSE",
+    "label": "below 200dma dip",
+    "conditions": [
+      {
+        "metric": "price_vs_ma200",
+        "op": "<",
+        "value": -10
+      }
+    ],
+    "active": 1
+  }
+]

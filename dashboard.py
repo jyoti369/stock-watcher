@@ -9,8 +9,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import subprocess
+
 from src import (alerts, analysis, bearcase, datasource, db, projection,
-                 sectors, suggestions, watcher)
+                 repo_state, sectors, suggestions, watcher)
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 db.init_db()
@@ -22,6 +24,27 @@ PERIODS = {"3 months": 0.25, "6 months": 0.5, "1 year": 1.0, "3 years": 3.0, "5 
 
 def inr(v) -> str:
     return f"₹{v:,.0f}" if isinstance(v, (int, float)) else "—"
+
+
+def sync_to_github() -> tuple[bool, str]:
+    """Commit the state/*.json (watchlist + rules) and push, so the GitHub Actions
+    alert watcher picks them up. Pull --rebase first so the Action's cooldown
+    commits (different files) merge cleanly."""
+    repo_state.export_config()
+    try:
+        subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json"],
+                       check=True, cwd=str(repo_state.ROOT), capture_output=True)
+        r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
+                           cwd=str(repo_state.ROOT), capture_output=True, text=True)
+        if "nothing to commit" in (r.stdout + r.stderr):
+            return True, "already up to date"
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"],
+                       check=True, cwd=str(repo_state.ROOT), capture_output=True)
+        subprocess.run(["git", "push", "origin", "main"],
+                       check=True, cwd=str(repo_state.ROOT), capture_output=True)
+        return True, "pushed to GitHub"
+    except subprocess.CalledProcessError as e:
+        return False, (e.stderr or b"").decode()[:200] if isinstance(e.stderr, bytes) else str(e)
 
 
 def monte_carlo_block(symbol, exchange, years, amount, period_label):
@@ -53,6 +76,7 @@ with st.sidebar:
             new_exch = st.selectbox("Exchange", ["NSE", "BSE"])
             if st.form_submit_button("Add", width="stretch") and new_sym:
                 db.add_to_watchlist(new_sym, new_exch, datasource.resolve_name(new_sym, new_exch))
+                repo_state.export_config()
                 st.toast(f"Added {new_sym}")
                 st.rerun()
 
@@ -63,6 +87,11 @@ with st.sidebar:
     if st.button("🔔 Run alert check now", width="stretch"):
         fired = watcher.run_once(verbose=False)
         st.toast(f"{len(fired)} alert(s) fired" if fired else "Checked — nothing triggered")
+
+    if st.button("⬆️ Sync watchlist/rules to GitHub", width="stretch"):
+        ok, msg = sync_to_github()
+        st.toast(("✅ " if ok else "⚠️ ") + msg)
+    st.caption("Sync so the 24/7 GitHub Actions watcher sees your latest watchlist & rules.")
 
 
 watchlist = db.get_watchlist()
@@ -103,6 +132,7 @@ with tabs[0]:
                 c1.write(f"{w['symbol']} · {w['exchange']} — {w.get('name','')}")
                 if c2.button("Remove", key=f"rm_{w['symbol']}_{w['exchange']}"):
                     db.remove_from_watchlist(w["symbol"], w["exchange"])
+                    repo_state.export_config()
                     st.rerun()
 
 # ============================================================= suggestions
@@ -309,6 +339,7 @@ with tabs[3]:
                     conditions.append({"metric": met, "op": op, "value": val})
             if st.form_submit_button("Create rule") and r_sym and conditions:
                 db.add_rule(r_sym, r_exch, r_label or "alert", conditions)
+                repo_state.export_config()
                 st.toast(f"Rule created for {r_sym}")
                 st.rerun()
 
@@ -320,9 +351,9 @@ with tabs[3]:
         cols = st.columns([4, 1, 1])
         cols[0].write(f"{'🟢' if rule['active'] else '⏸️'} **{rule['symbol']}** — {rule.get('label')}  \n{cond_txt}")
         if cols[1].button("Toggle", key=f"tog_{rule['id']}"):
-            db.set_rule_active(rule["id"], not rule["active"]); st.rerun()
+            db.set_rule_active(rule["id"], not rule["active"]); repo_state.export_config(); st.rerun()
         if cols[2].button("Delete", key=f"del_{rule['id']}"):
-            db.delete_rule(rule["id"]); st.rerun()
+            db.delete_rule(rule["id"]); repo_state.export_config(); st.rerun()
     if not rules:
         st.info("No rules yet.")
 

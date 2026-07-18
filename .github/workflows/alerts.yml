@@ -1,0 +1,57 @@
+name: alert-watcher
+
+# Runs the alert watcher on GitHub's servers — no machine of yours needs to be on.
+# Scheduled for NSE market hours (weekdays), which keeps it well inside the free
+# Actions minutes. Cron is UTC: 03:00–10:xx UTC ≈ 08:30–15:30 IST.
+on:
+  schedule:
+    - cron: "*/30 3-10 * * 1-5"
+  workflow_dispatch:            # lets you run it manually from the Actions tab
+
+# needed so the job can commit cooldown state back to the repo
+permissions:
+  contents: write
+
+concurrency:                    # never run two checks at once
+  group: alert-watcher
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-watcher.txt
+
+      - name: install deps
+        run: pip install -r requirements-watcher.txt
+
+      - name: run alert watcher
+        env:
+          STOCKWATCH_TG_TOKEN: ${{ secrets.STOCKWATCH_TG_TOKEN }}
+          STOCKWATCH_TG_CHAT: ${{ secrets.STOCKWATCH_TG_CHAT }}
+          STOCKWATCH_SMTP_USER: ${{ secrets.STOCKWATCH_SMTP_USER }}
+          STOCKWATCH_SMTP_PASS: ${{ secrets.STOCKWATCH_SMTP_PASS }}
+          STOCKWATCH_EMAIL_TO: ${{ secrets.STOCKWATCH_EMAIL_TO }}
+        run: |
+          python -m src.repo_state import
+          python -m src.watcher
+          python -m src.repo_state export
+
+      - name: commit cooldown state
+        run: |
+          git config user.name "stock-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/alert_state.json state/alerts_log.json
+          if git diff --cached --quiet; then
+            echo "no state change"
+          else
+            git commit -m "chore: update alert state [skip ci]"
+            git pull --rebase origin main
+            git push
+          fi
