@@ -40,19 +40,5 @@
     ],
     "active": 1,
     "mode": "edge"
-  },
-  {
-    "symbol": "PVRINOX",
-    "exchange": "NSE",
-    "label": "price above ₹1049",
-    "conditions": [
-      {
-        "metric": "price",
-        "op": ">",
-        "value": 1049.0
-      }
-    ],
-    "active": 1,
-    "mode": "edge"
   }
 ]

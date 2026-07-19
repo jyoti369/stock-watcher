@@ -194,6 +194,30 @@ def test_clean_symbol():
     assert importer.clean_symbol("BAJAJ-AUTO") == "BAJAJ-AUTO"   # real hyphen name kept
 
 
+def test_holdings_encryption_roundtrip(tmp_path, monkeypatch):
+    from src import repo_state
+    monkeypatch.setattr(repo_state, "HOLDINGS_JSON", tmp_path / "holdings.json")
+    monkeypatch.setattr(repo_state, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "test-key-123")
+    data = [{"symbol": "TCS", "exchange": "NSE", "qty": 10, "buy_price": 2000.0, "buy_date": None}]
+    repo_state._write_holdings(data)
+
+    on_disk = (tmp_path / "holdings.json").read_text()
+    assert "TCS" not in on_disk and '"encrypted": true' in on_disk   # ciphertext only
+    assert repo_state._read_holdings_raw() == data                    # decrypts back
+
+    # unchanged data -> file NOT rewritten (no ciphertext churn / commits)
+    before = on_disk
+    repo_state._write_holdings(data)
+    assert (tmp_path / "holdings.json").read_text() == before
+
+    # wrong/no key -> unreadable, degrades to None (Action-safe)
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "another-key")
+    assert repo_state._read_holdings_raw() is None
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY")
+    assert repo_state._read_holdings_raw() is None
+
+
 def test_rule_key_stable_and_distinct():
     base = {"symbol": "TCS", "exchange": "NSE", "label": "a",
             "conditions": [{"metric": "price", "op": ">", "value": 1}]}

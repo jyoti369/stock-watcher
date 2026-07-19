@@ -12,8 +12,10 @@ Because the two sides touch different files, `git pull --rebase` merges cleanly.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from . import db
@@ -39,6 +41,55 @@ def _read(path: Path, default):
         return default
 
 
+# ---- holdings encryption ---------------------------------------------------
+# The repo is public, but holdings = real money positions. With a key set
+# (STOCKWATCH_STATE_KEY), holdings.json is committed as Fernet ciphertext;
+# only devices holding the key (your Mac, your Streamlit secrets) can read it.
+
+def _fernet():
+    key_src = os.environ.get("STOCKWATCH_STATE_KEY", "")
+    if not key_src:
+        return None
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(key_src.encode()).digest())
+    return Fernet(key)
+
+
+def _write_holdings(data: list) -> None:
+    plaintext = json.dumps(data, ensure_ascii=False)
+    f = _fernet()
+    if f is None:
+        _write(HOLDINGS_JSON, data)                    # no key -> legacy plaintext
+        return
+    # Fernet tokens differ per encryption; avoid pointless commits by skipping
+    # the rewrite when the decrypted current file already matches.
+    current = _read_holdings_raw()
+    if current is not None and json.dumps(current, ensure_ascii=False) == plaintext:
+        return
+    STATE_DIR.mkdir(exist_ok=True)
+    HOLDINGS_JSON.write_text(json.dumps(
+        {"encrypted": True, "cipher": f.encrypt(plaintext.encode()).decode()}))
+
+
+def _read_holdings_raw() -> list | None:
+    """Decrypt-or-parse holdings.json. None if unreadable (no key / bad key)."""
+    try:
+        raw = json.loads(HOLDINGS_JSON.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if isinstance(raw, list):                          # legacy plaintext
+        return raw
+    if isinstance(raw, dict) and raw.get("encrypted"):
+        f = _fernet()
+        if f is None:
+            return None
+        try:
+            return json.loads(f.decrypt(raw["cipher"].encode()).decode())
+        except Exception:
+            return None
+    return None
+
+
 def rule_key(r: dict) -> str:
     """Stable content key for a rule (DB ids aren't stable across Action runs)."""
     raw = f"{r['symbol']}|{r['exchange']}|{r.get('label','')}|" \
@@ -50,7 +101,7 @@ def rule_key(r: dict) -> str:
 
 def export_config() -> None:
     _write(WATCHLIST_JSON, db.get_watchlist())
-    _write(HOLDINGS_JSON, [
+    _write_holdings([
         {"symbol": h["symbol"], "exchange": h["exchange"], "qty": h["qty"],
          "buy_price": h["buy_price"], "buy_date": h.get("buy_date")}
         for h in db.get_holdings()
@@ -75,7 +126,7 @@ def import_from_repo() -> None:
     for w in _read(WATCHLIST_JSON, []):
         db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"))
 
-    for h in _read(HOLDINGS_JSON, []):
+    for h in (_read_holdings_raw() or []):             # [] if encrypted and no key (e.g. the Action)
         db.add_holding(h["symbol"], h.get("exchange", "NSE"),
                        h["qty"], h["buy_price"], h.get("buy_date"))
 

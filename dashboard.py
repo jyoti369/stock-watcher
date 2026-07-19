@@ -18,7 +18,8 @@ import streamlit as st
 try:
     for _k in ["STOCKWATCH_TG_TOKEN", "STOCKWATCH_TG_CHAT", "STOCKWATCH_SMTP_USER",
                "STOCKWATCH_SMTP_PASS", "STOCKWATCH_EMAIL_TO", "STOCKWATCH_APP_PASSWORD",
-               "STOCKWATCH_GEMINI_KEY", "STOCKWATCH_OPENAI_KEY", "STOCKWATCH_GH_TOKEN"]:
+               "STOCKWATCH_GEMINI_KEY", "STOCKWATCH_OPENAI_KEY", "STOCKWATCH_GH_TOKEN",
+               "STOCKWATCH_STATE_KEY"]:
         if _k in st.secrets:
             os.environ[_k] = str(st.secrets[_k])
 except Exception:
@@ -228,6 +229,12 @@ with tabs[1]:
     st.subheader("💼 Portfolio")
     st.caption("What you actually hold, with live profit & loss. Add each buy below — "
                "the same stock bought twice shows as two lots.")
+    if os.environ.get("STOCKWATCH_STATE_KEY"):
+        st.caption("🔒 Your holdings are **encrypted** before syncing — the public repo "
+                   "only ever sees ciphertext.")
+    else:
+        st.warning("⚠️ No STOCKWATCH_STATE_KEY set — holdings would sync in plaintext to "
+                   "the public repo. Add the key (see secrets file) before importing real data.")
 
     with st.expander("➕ Add a holding", expanded=not db.get_holdings()):
         with st.form("add_holding", clear_on_submit=True):
