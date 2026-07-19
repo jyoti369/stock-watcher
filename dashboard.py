@@ -25,8 +25,8 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, gh_sync, portfolio, projection, repo_state,
-                 scan_history, sectors, suggestions, verdict, watcher)
+                 fundamentals, gh_sync, importer, portfolio, projection,
+                 repo_state, scan_history, sectors, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -244,10 +244,81 @@ with tabs[1]:
                 st.toast(f"Added {h_qty:g} × {h_sym} @ ₹{h_price:g}")
                 st.rerun()
 
+    with st.expander("📥 Import from Angel One / any broker"):
+        st.caption("Fastest way to fill this page: upload the holdings file your broker "
+                   "gives you, or just paste the rows. You'll see a preview to check/fix "
+                   "before anything is saved. **Importing replaces all current holdings** "
+                   "(the statement is the whole truth).")
+        up_tab, paste_tab = st.tabs(["📄 Upload file (CSV/Excel)", "📋 Paste rows"])
+
+        with up_tab:
+            st.caption("Angel One app/web → Portfolio/Reports → Holdings → download.")
+            f = st.file_uploader("Holdings file", type=["csv", "xlsx", "xls"],
+                                 label_visibility="collapsed")
+            if f is not None and st.button("Read file", key="imp_read"):
+                try:
+                    fdf = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
+                    rows, err = importer.parse_table(fdf)
+                except Exception as e:
+                    rows, err = [], f"Couldn't read the file: {str(e)[:120]}"
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state["import_preview"] = rows
+                    st.rerun()
+
+        with paste_tab:
+            st.caption("One holding per line, e.g. `INFY 10 1450.50` — messy text is fine, "
+                       "AI parsing handles it.")
+            pasted = st.text_area("Paste here", height=140, label_visibility="collapsed",
+                                  placeholder="INFY 10 1450.50\nTCS-EQ 5 3120\nCDSL 20 1150.25")
+            pc1, pc2 = st.columns(2)
+            if pc1.button("Parse", key="imp_parse") and pasted.strip():
+                rows = importer.parse_text(pasted)
+                if rows:
+                    st.session_state["import_preview"] = rows
+                    st.rerun()
+                else:
+                    st.warning("Couldn't parse that — try 'Parse with AI'.")
+            if pc2.button("✨ Parse with AI", key="imp_ai") and pasted.strip():
+                with st.spinner("Reading your paste…"):
+                    rows, err = importer.parse_with_ai(pasted)
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state["import_preview"] = rows
+                    st.rerun()
+
+        preview = st.session_state.get("import_preview")
+        if preview:
+            st.markdown(f"**Check these {len(preview)} holdings** — edit anything that's "
+                        "off, then confirm:")
+            edited = st.data_editor(
+                pd.DataFrame(preview), num_rows="dynamic", hide_index=True,
+                column_config={
+                    "symbol": st.column_config.TextColumn("Symbol", required=True),
+                    "qty": st.column_config.NumberColumn("Qty", min_value=0.0),
+                    "buy_price": st.column_config.NumberColumn("Avg buy ₹", min_value=0.0),
+                }, key="imp_editor")
+            cc1, cc2 = st.columns(2)
+            if cc1.button(f"✅ Replace my holdings with these {len(edited)} rows",
+                          type="primary", key="imp_go"):
+                good = [r for r in edited.to_dict("records")
+                        if r.get("symbol") and (r.get("qty") or 0) > 0 and (r.get("buy_price") or 0) > 0]
+                n = db.replace_holdings(good)
+                del st.session_state["import_preview"]
+                auto_sync()
+                st.toast(f"Imported {n} holdings")
+                st.rerun()
+            if cc2.button("Cancel", key="imp_cancel"):
+                del st.session_state["import_preview"]
+                st.rerun()
+
     holdings = db.get_holdings()
     if not holdings:
-        st.info("No holdings yet. Add what you own above — then this page shows your live "
-                "P&L, today's move, and each stock's health at a glance.")
+        st.info("No holdings yet. **Import from your broker above** (30 seconds), or add "
+                "one manually — then this page shows your live P&L, today's move, and "
+                "each stock's health at a glance.")
     else:
         lot_rows, rows = [], []
         for h in holdings:

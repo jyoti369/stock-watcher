@@ -203,6 +203,21 @@ def remove_holding(holding_id: int) -> None:
         conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,))
 
 
+def replace_holdings(rows: Iterable[dict]) -> int:
+    """Broker-import semantics: the imported statement is the whole truth."""
+    rows = list(rows)
+    with connect() as conn:
+        conn.execute("DELETE FROM holdings")
+        for r in rows:
+            conn.execute(
+                "INSERT INTO holdings(symbol, exchange, qty, buy_price, buy_date, added_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (r["symbol"].upper(), r.get("exchange", "NSE").upper(), r["qty"],
+                 r["buy_price"], r.get("buy_date"), now_iso()),
+            )
+    return len(rows)
+
+
 # ---- alert history -------------------------------------------------------
 
 def log_alert(rule_id: int | None, symbol: str, exchange: str, message: str,

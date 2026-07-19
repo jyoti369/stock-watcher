@@ -150,6 +150,38 @@ def test_scan_history_roundtrip(tmp_path, monkeypatch):
     assert len(scan_history.load()) == scan_history.MAX_SCANS
 
 
+def test_importer_table_angelone_style():
+    from src import importer
+    # Angel One-ish headers
+    df = pd.DataFrame({"Tradingsymbol": ["INFY-EQ", "TCS-EQ", "TOTAL"],
+                       "Quantity": [10, 5, None],
+                       "Avg. Buy Price": ["1,450.50", 3120, None]})
+    rows, err = importer.parse_table(df)
+    assert err is None and len(rows) == 2
+    assert rows[0] == {"symbol": "INFY", "qty": 10.0, "buy_price": 1450.5}
+
+    # unknown headers -> helpful error
+    bad, err2 = importer.parse_table(pd.DataFrame({"Foo": [1], "Bar": [2]}))
+    assert bad == [] and "Couldn't find" in err2
+
+
+def test_importer_paste():
+    from src import importer
+    rows = importer.parse_text("INFY 10 1450.50\nTCS-EQ 5 3120\nM&M 12 2890.1\ngarbage line")
+    syms = [r["symbol"] for r in rows]
+    assert syms == ["INFY", "TCS", "M&M"]
+    assert rows[0]["qty"] == 10 and rows[0]["buy_price"] == 1450.5
+    # price-first order gets swapped by the whole-number heuristic
+    r2 = importer.parse_text("CDSL 1150.25 20")
+    assert r2[0]["qty"] == 20 and r2[0]["buy_price"] == 1150.25
+
+
+def test_clean_symbol():
+    from src import importer
+    assert importer.clean_symbol("NSE: INFY-EQ") == "INFY"
+    assert importer.clean_symbol("BAJAJ-AUTO") == "BAJAJ-AUTO"   # real hyphen name kept
+
+
 def test_rule_key_stable_and_distinct():
     base = {"symbol": "TCS", "exchange": "NSE", "label": "a",
             "conditions": [{"metric": "price", "op": ">", "value": 1}]}
