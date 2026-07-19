@@ -22,21 +22,35 @@ from .config import CONFIG
 
 _CACHE: dict[str, tuple[float, Any]] = {}
 
+_MISS = object()          # sentinel: "this fetch just failed — don't retry for a bit"
+_MISS_TTL = 120           # seconds a failure is remembered; keeps dead symbols from
+                          # burning retry-sleeps on every dashboard rerun
+
 
 def _default_ttl() -> int:
     return int(CONFIG["data"]["cache_minutes"]) * 60
 
 
 def _cached(key: str, ttl: int | None = None):
+    """Value if fresh, _MISS if a recent failure, None if absent/expired."""
     hit = _CACHE.get(key)
-    if hit and (time.time() - hit[0]) < (ttl or _default_ttl()):
-        return hit[1]
+    if not hit:
+        return None
+    ts, val = hit
+    if val is _MISS:
+        return _MISS if (time.time() - ts) < _MISS_TTL else None
+    if (time.time() - ts) < (ttl or _default_ttl()):
+        return val
     return None
 
 
 def _store(key: str, value):
     _CACHE[key] = (time.time(), value)
     return value
+
+
+def _remember_miss(key: str) -> None:
+    _CACHE[key] = (time.time(), _MISS)
 
 
 def _with_retry(fn, attempts: int = 3, backoff: float = 1.5):
@@ -78,6 +92,8 @@ def get_history(symbol: str, exchange: str = "NSE", period: str | None = None) -
     period = period or CONFIG["data"]["history_period"]
     key = f"hist:{yf_symbol(symbol, exchange)}:{period}"
     cached = _cached(key)
+    if cached is _MISS:
+        return pd.DataFrame()          # recent failure — don't hammer/sleep again yet
     if cached is not None:
         return cached
 
@@ -86,7 +102,8 @@ def get_history(symbol: str, exchange: str = "NSE", period: str | None = None) -
         alt = _other_exchange(exchange)
         df = _with_retry(lambda: yf.Ticker(yf_symbol(symbol, alt)).history(period=period, auto_adjust=True))
     if df is None:
-        return pd.DataFrame()          # don't cache failures — retry next time
+        _remember_miss(key)
+        return pd.DataFrame()
     return _store(key, df)
 
 
@@ -108,6 +125,8 @@ def get_fundamentals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     """Subset of Yahoo's .info we score on + analyst targets. {} (uncached) on failure."""
     key = f"fund:{yf_symbol(symbol, exchange)}"
     cached = _cached(key)
+    if cached is _MISS:
+        return {}
     if cached is not None:
         return cached
 
@@ -123,7 +142,8 @@ def get_fundamentals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     if out is None and not _has_suffix(symbol):
         out = _with_retry(lambda: fetch(_other_exchange(exchange)))
     if out is None:
-        return {}                       # don't cache failures
+        _remember_miss(key)
+        return {}
     return _store(key, out)
 
 
@@ -132,6 +152,10 @@ def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     Keys: price, prev_close, change, pct_change, source, ok. Cached ~2 min."""
     key = f"live:{yf_symbol(symbol, exchange)}"
     cached = _cached(key, ttl=120)
+    _nores = {"price": None, "prev_close": None, "change": None,
+              "pct_change": None, "source": None, "ok": False}
+    if cached is _MISS:
+        return dict(_nores)
     if cached is not None:
         return cached
 
@@ -173,8 +197,8 @@ def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     if result is None and not _has_suffix(symbol):
         result = _with_retry(lambda: attempt(_other_exchange(exchange)), attempts=2)
     if result is None:
-        return {"price": None, "prev_close": None, "change": None,
-                "pct_change": None, "source": None, "ok": False}
+        _remember_miss(key)
+        return dict(_nores)
     return _store(key, result)
 
 
@@ -182,6 +206,8 @@ def get_news(symbol: str, exchange: str = "NSE", limit: int = 6) -> list[dict[st
     """Recent headlines for the stock (real 'current situation' context). [] on failure."""
     key = f"news:{yf_symbol(symbol, exchange)}"
     cached = _cached(key, ttl=1800)
+    if cached is _MISS:
+        return []
     if cached is not None:
         return cached
     items: list[dict[str, Any]] = []
@@ -201,6 +227,7 @@ def get_news(symbol: str, exchange: str = "NSE", limit: int = 6) -> list[dict[st
     except Exception:
         items = []
     if not items:
+        _remember_miss(key)
         return []
     return _store(key, items)
 

@@ -218,6 +218,20 @@ def test_holdings_encryption_roundtrip(tmp_path, monkeypatch):
     assert repo_state._read_holdings_raw() is None
 
 
+def test_negative_cache(monkeypatch):
+    from src import datasource as ds
+    ds._CACHE.clear()
+    ds._remember_miss("k1")
+    assert ds._cached("k1") is ds._MISS            # fresh failure -> MISS sentinel
+    # expired failure -> None (retry allowed)
+    ds._CACHE["k1"] = (0, ds._MISS)
+    assert ds._cached("k1") is None
+    # real values still work
+    ds._store("k2", {"a": 1})
+    assert ds._cached("k2") == {"a": 1}
+    ds._CACHE.clear()
+
+
 def test_rule_key_stable_and_distinct():
     base = {"symbol": "TCS", "exchange": "NSE", "label": "a",
             "conditions": [{"metric": "price", "op": ">", "value": 1}]}

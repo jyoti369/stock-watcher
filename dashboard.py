@@ -179,7 +179,24 @@ with st.sidebar:
                    "stick too, add a STOCKWATCH_GH_TOKEN secret (see DEPLOY.md).")
 
 
+def _warm_caches(pairs: list[tuple[str, str]]) -> None:
+    """Fetch all symbols' data in parallel once, so the per-tab loops below hit
+    warm caches instead of doing ~30 sequential network round-trips per rerun."""
+    pairs = list(dict.fromkeys(pairs))
+    if len(pairs) < 2:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        with ThreadPoolExecutor(max_workers=min(8, len(pairs))) as ex:
+            list(ex.map(lambda p: watcher.gather_values(p[0], p[1]), pairs))
+    except Exception:
+        pass
+
+
 watchlist = db.get_watchlist()
+_warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
+             + [(h["symbol"], h["exchange"]) for h in db.get_holdings()]
+             + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
                 "🔍 Stock analysis", "🔔 Alerts"])
 
