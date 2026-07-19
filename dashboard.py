@@ -255,12 +255,13 @@ with tabs[1]:
             st.caption("Angel One app/web → Portfolio/Reports → Holdings → download.")
             f = st.file_uploader("Holdings file", type=["csv", "xlsx", "xls"],
                                  label_visibility="collapsed")
+            fpw = st.text_input("File password (only if the file is locked — usually your "
+                                "PAN in capitals)", type="password", key="imp_pw")
             if f is not None and st.button("Read file", key="imp_read"):
-                try:
-                    fdf = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
+                fdf, err = importer.read_any_excel(f, f.name, password=fpw or None)
+                rows = []
+                if not err:
                     rows, err = importer.parse_table(fdf)
-                except Exception as e:
-                    rows, err = [], f"Couldn't read the file: {str(e)[:120]}"
                 if err:
                     st.error(err)
                 else:

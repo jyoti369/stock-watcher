@@ -176,6 +176,18 @@ def test_importer_paste():
     assert r2[0]["qty"] == 20 and r2[0]["buy_price"] == 1150.25
 
 
+def test_importer_header_sniff():
+    from src import importer
+    # title junk above the real header row (typical broker sheet)
+    df = pd.DataFrame([["Your Holding Details", None, None],
+                       ["As on 19-07-2026", None, None],
+                       ["Symbol", "Qty", "Avg Price"],
+                       ["INFY", 10, 1450.5],
+                       ["TCS", 5, 3120]])
+    rows, err = importer.parse_table(df)
+    assert err is None and [r["symbol"] for r in rows] == ["INFY", "TCS"]
+
+
 def test_clean_symbol():
     from src import importer
     assert importer.clean_symbol("NSE: INFY-EQ") == "INFY"

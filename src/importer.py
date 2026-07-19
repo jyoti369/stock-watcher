@@ -61,10 +61,82 @@ def _to_num(v) -> float | None:
         return None
 
 
+def read_any_excel(file_obj, filename: str, password: str | None = None
+                   ) -> tuple[pd.DataFrame | None, str | None]:
+    """Read a broker CSV/XLSX robustly. Handles the two real-world traps:
+    - files encrypted by the broker (tries Excel's default password, then the
+      user-supplied one — typically your PAN)
+    - Apple Numbers files renamed .xlsx (tells the user to export as CSV)
+    Returns (df, error)."""
+    import io as _io
+    import zipfile
+
+    raw = file_obj.read()
+    name = filename.lower()
+
+    if name.endswith(".csv"):
+        try:
+            return pd.read_csv(_io.BytesIO(raw)), None
+        except Exception as e:
+            return None, f"Couldn't read the CSV: {str(e)[:120]}"
+
+    # Apple Numbers in disguise? (zip with iWork internals, not xl/)
+    try:
+        with zipfile.ZipFile(_io.BytesIO(raw)) as z:
+            names = z.namelist()
+            if any(n.startswith("Index/") and n.endswith(".iwa") for n in names):
+                return None, ("This is an Apple **Numbers** file (renamed .xlsx). In Numbers: "
+                              "File → Export To → **CSV**, then upload that.")
+    except zipfile.BadZipFile:
+        pass
+
+    # plain xlsx first
+    try:
+        return pd.read_excel(_io.BytesIO(raw)), None
+    except Exception:
+        pass
+
+    # encrypted? try Excel's silent default, then the user's password (PAN etc.)
+    try:
+        import msoffcrypto
+        for pw in filter(None, ["VelvetSweatshop", password]):
+            try:
+                off = msoffcrypto.OfficeFile(_io.BytesIO(raw))
+                off.load_key(password=pw)
+                buf = _io.BytesIO()
+                off.decrypt(buf)
+                buf.seek(0)
+                return pd.read_excel(buf), None
+            except Exception:
+                continue
+        return None, ("This file is **password-locked** by the broker (usually your PAN, "
+                      "in CAPITALS). Enter it in the password box and hit Read file again — "
+                      "it's used only to open the file, never stored.")
+    except ImportError:
+        return None, "Locked file support missing (msoffcrypto-tool not installed)."
+
+
+def _sniff_header(df: pd.DataFrame) -> pd.DataFrame:
+    """Broker sheets often stack title/logo rows above the real header. If the
+    current columns don't look like a header, hunt one in the first 10 rows."""
+    headers = {_norm_header(c): c for c in df.columns}
+    if _find_col(headers, _SYMBOL_KEYS) and _find_col(headers, _QTY_KEYS):
+        return df
+    for i in range(min(10, len(df))):
+        row = [str(v) for v in df.iloc[i].tolist()]
+        h = {_norm_header(v): v for v in row}
+        if _find_col(h, _SYMBOL_KEYS) and _find_col(h, _QTY_KEYS) and _find_col(h, _PRICE_KEYS):
+            out = df.iloc[i + 1:].copy()
+            out.columns = row
+            return out
+    return df
+
+
 def parse_table(df: pd.DataFrame) -> tuple[list[dict[str, Any]], str | None]:
     """Broker CSV/XLSX -> candidate rows. Returns (rows, error)."""
     if df is None or df.empty:
         return [], "The file is empty."
+    df = _sniff_header(df)
     headers = {_norm_header(c): c for c in df.columns}
     sym_col = _find_col(headers, _SYMBOL_KEYS)
     qty_col = _find_col(headers, _QTY_KEYS)
