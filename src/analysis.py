@@ -222,9 +222,9 @@ def score_fundamentals(symbol: str, exchange: str = "NSE",
         above50 = m["price_vs_ma50"] > 0
         above200 = m["price_vs_ma200"] > 0
         if above50 and above200:
-            trend["direction"] = "uptrend (above 50 & 200 DMA)"
+            trend["direction"] = "uptrend — price above its 50- and 200-day averages"
         elif not above50 and not above200:
-            trend["direction"] = "downtrend (below 50 & 200 DMA)"
+            trend["direction"] = "downtrend — price below its 50- and 200-day averages"
         else:
             trend["direction"] = "sideways / transitioning"
     if m.get("rsi14") is not None:

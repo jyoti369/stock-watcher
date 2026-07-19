@@ -120,21 +120,34 @@ def auto_sync() -> None:
 
 
 def monte_carlo_block(symbol, exchange, years, amount, period_label):
-    """Shared Monte Carlo renderer for a stock."""
+    """Shared probability-range renderer. Plain-first: the odds verdict leads,
+    the quant labels ride along in brackets so users learn the terms."""
     hist = datasource.get_history(symbol, exchange)
     mc = projection.monte_carlo(hist, years, amount)
     if not mc:
         st.caption("Not enough price history for a projection.")
         return
+    p = mc["prob_profit"]
+    if p >= 60:
+        odds = f"🟢 The odds lean **in your favour** — {p:.0f}% of scenarios ended in profit."
+    elif p >= 45:
+        odds = f"🟡 **Roughly a coin flip** — {p:.0f}% of scenarios ended in profit."
+    else:
+        odds = f"🔴 The odds lean **against you** — only {p:.0f}% of scenarios ended in profit."
+    st.markdown(odds)
     d, m, u = st.columns(3)
-    d.metric(f"Downside (worst 10%)", inr(mc["p10_end"]), f"{mc['p10_ret']:+.0f}%")
-    m.metric(f"Median outcome", inr(mc["median_end"]), f"{mc['median_ret']:+.0f}%")
-    u.metric(f"Upside (best 10%)", inr(mc["p90_end"]), f"{mc['p90_ret']:+.0f}%")
+    d.metric("If it goes badly", inr(mc["p10_end"]), f"{mc['p10_ret']:+.0f}%",
+             help="The worst 10% of simulated outcomes ended at or below this.")
+    m.metric("Middle of the road", inr(mc["median_end"]), f"{mc['median_ret']:+.0f}%",
+             help="The median — half the simulations ended above this, half below. "
+                  "The most honest single guess.")
+    u.metric("If it goes well", inr(mc["p90_end"]), f"{mc['p90_ret']:+.0f}%",
+             help="The best 10% of simulated outcomes ended at or above this.")
     st.caption(
-        f"{inr(amount)} held ~{period_label}: **{mc['prob_profit']:.0f}% chance of a profit**, "
-        f"{mc['prob_loss20']:.0f}% chance of losing more than 20%. "
-        f"From {mc['sims']:,} simulations resampling this stock's own past daily moves — "
-        "a range of possibilities, not a prediction.")
+        f"How to read this: we replayed this stock's own past daily moves {mc['sims']:,} times "
+        f"('Monte Carlo simulation') to see where {inr(amount)} could land in ~{period_label}. "
+        f"{mc['prob_loss20']:.0f}% of runs lost more than 20%. "
+        "It shows the *range* of realistic outcomes — it does not predict which one you'll get.")
 
 
 # ================================================================ sidebar
@@ -518,7 +531,7 @@ with tabs[2]:
                 st.markdown(f"**📈 What you might make · {period_label} · {inr(amount)}**")
                 monte_carlo_block(r["symbol"], r["exchange"], years, amount, period_label)
                 if av:
-                    st.caption(f"Analyst 12-month view: {av['num_analysts'] or '?'} analysts rate it "
+                    st.caption(f"What the pros expect (12-month): {av['num_analysts'] or '?'} analysts rate it "
                                f"*{av['recommendation']}*, mean target {inr(av['target'])} "
                                f"(range {inr(av['low'])}–{inr(av['high'])}).")
 
@@ -741,7 +754,7 @@ with tabs[3]:
                     st.caption(f"via {res['engine']} — a summary of public news, not advice.")
 
         # probabilistic projection
-        st.markdown("**📈 Probabilistic projection**")
+        st.markdown("**📈 What your money could become** (probabilistic projection)")
         pc1, pc2 = st.columns(2)
         p_period = pc1.selectbox("Period", list(PERIODS.keys()), index=2, key="an_period")
         p_amount = pc2.number_input("Amount (₹)", min_value=1000, value=100000, step=10000, key="an_amt")
@@ -818,7 +831,7 @@ with tabs[4]:
                 m4.metric("P/E", f"{snap['pe']:.1f}" if snap.get("pe") else "—")
                 extras = []
                 for k, lbl in [("ret_1w", "1w"), ("ret_1m", "1m"), ("ret_1y", "1y"),
-                               ("price_vs_ma50", "vs 50-DMA"), ("price_vs_ma200", "vs 200-DMA")]:
+                               ("price_vs_ma50", "vs 50-day avg"), ("price_vs_ma200", "vs 200-day avg")]:
                     if snap.get(k) is not None:
                         extras.append(f"{lbl} {snap[k]:+.1f}%")
                 if extras:
@@ -832,7 +845,7 @@ with tabs[4]:
                     _make("RSI oversold (<30)", [{"metric": "rsi14", "op": "<", "value": 30}])
                 if q[2].button("RSI overbought >70", key="qa3"):
                     _make("RSI overbought (>70)", [{"metric": "rsi14", "op": ">", "value": 70}])
-                if q[3].button("Below 200-DMA", key="qa4"):
+                if q[3].button("Below 200-day avg", key="qa4"):
                     _make("below 200-day avg", [{"metric": "price_vs_ma200", "op": "<", "value": 0}])
 
                 st.markdown("**Price target** (pre-filled ±5% from now — just tweak)")
