@@ -265,10 +265,11 @@ with tabs[1]:
             fpw = st.text_input("File password (only if the file is locked — usually your "
                                 "PAN in capitals)", type="password", key="imp_pw")
             if f is not None and st.button("Read file", key="imp_read"):
-                fdf, err = importer.read_any_excel(f, f.name, password=fpw or None)
-                rows = []
-                if not err:
-                    rows, err = importer.parse_table(fdf)
+                with st.spinner("Reading file & resolving symbols…"):
+                    fdf, err = importer.read_any_excel(f, f.name, password=fpw or None)
+                    rows = []
+                    if not err:
+                        rows, err = importer.parse_workbook(fdf)
                 if err:
                     st.error(err)
                 else:

@@ -23,7 +23,9 @@ import pandas as pd
 _SYMBOL_KEYS = ["tradingsymbol", "symbol", "scrip", "instrument", "stockname", "stock", "name"]
 _QTY_KEYS = ["netqty", "totalqty", "quantityavailable", "quantity", "qty", "shares", "units"]
 _PRICE_KEYS = ["avgbuyprice", "buyavgprice", "avgcostprice", "averageprice", "avgprice",
-               "buyavg", "avgcost", "buyprice", "costprice", "avgrate"]
+               "avgtradingprice", "tradingprice", "buyavg", "avgcost", "buyprice",
+               "costprice", "avgrate"]
+_ISIN_KEYS = ["isin"]
 
 _SUFFIXES = ("-EQ", "-BE", "-BZ", "-SM", "-ST")
 
@@ -76,7 +78,7 @@ def read_any_excel(file_obj, filename: str, password: str | None = None
 
     if name.endswith(".csv"):
         try:
-            return pd.read_csv(_io.BytesIO(raw)), None
+            return {"data": pd.read_csv(_io.BytesIO(raw))}, None
         except Exception as e:
             return None, f"Couldn't read the CSV: {str(e)[:120]}"
 
@@ -90,9 +92,9 @@ def read_any_excel(file_obj, filename: str, password: str | None = None
     except zipfile.BadZipFile:
         pass
 
-    # plain xlsx first
+    # plain xlsx first — all sheets (brokers split Equity/MF/SGB across sheets)
     try:
-        return pd.read_excel(_io.BytesIO(raw)), None
+        return pd.read_excel(_io.BytesIO(raw), sheet_name=None, header=None), None
     except Exception:
         pass
 
@@ -106,7 +108,7 @@ def read_any_excel(file_obj, filename: str, password: str | None = None
                 buf = _io.BytesIO()
                 off.decrypt(buf)
                 buf.seek(0)
-                return pd.read_excel(buf), None
+                return pd.read_excel(buf, sheet_name=None, header=None), None
             except Exception:
                 continue
         return None, ("This file is **password-locked** by the broker (usually your PAN, "
@@ -122,7 +124,7 @@ def _sniff_header(df: pd.DataFrame) -> pd.DataFrame:
     headers = {_norm_header(c): c for c in df.columns}
     if _find_col(headers, _SYMBOL_KEYS) and _find_col(headers, _QTY_KEYS):
         return df
-    for i in range(min(10, len(df))):
+    for i in range(min(40, len(df))):
         row = [str(v) for v in df.iloc[i].tolist()]
         h = {_norm_header(v): v for v in row}
         if _find_col(h, _SYMBOL_KEYS) and _find_col(h, _QTY_KEYS) and _find_col(h, _PRICE_KEYS):
@@ -132,8 +134,35 @@ def _sniff_header(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+_ISIN_CACHE: dict[str, str | None] = {}
+
+
+def isin_to_symbol(isin: str) -> str | None:
+    """Resolve an ISIN to its NSE ticker via Yahoo search (cached). None if unknown."""
+    isin = str(isin).strip().upper()
+    if not re.fullmatch(r"IN[A-Z0-9]{10}", isin):
+        return None
+    if isin in _ISIN_CACHE:
+        return _ISIN_CACHE[isin]
+    sym = None
+    try:
+        import yfinance as yf
+        for q in yf.Search(isin, max_results=5).quotes:
+            s = str(q.get("symbol", ""))
+            if s.endswith(".NS"):
+                sym = s[:-3]
+                break
+            if s.endswith(".BO") and sym is None:
+                sym = s[:-3]
+    except Exception:
+        pass
+    _ISIN_CACHE[isin] = sym
+    return sym
+
+
 def parse_table(df: pd.DataFrame) -> tuple[list[dict[str, Any]], str | None]:
-    """Broker CSV/XLSX -> candidate rows. Returns (rows, error)."""
+    """One sheet -> candidate rows. Prefers the ISIN column (resolved to real NSE
+    tickers) over display names. Returns (rows, error)."""
     if df is None or df.empty:
         return [], "The file is empty."
     df = _sniff_header(df)
@@ -141,17 +170,44 @@ def parse_table(df: pd.DataFrame) -> tuple[list[dict[str, Any]], str | None]:
     sym_col = _find_col(headers, _SYMBOL_KEYS)
     qty_col = _find_col(headers, _QTY_KEYS)
     price_col = _find_col(headers, _PRICE_KEYS)
-    if not (sym_col and qty_col and price_col):
-        missing = [n for n, c in [("symbol", sym_col), ("quantity", qty_col),
+    isin_col = _find_col(headers, _ISIN_KEYS)
+    if not ((sym_col or isin_col) and qty_col and price_col):
+        missing = [n for n, c in [("symbol/ISIN", sym_col or isin_col), ("quantity", qty_col),
                                   ("avg buy price", price_col)] if not c]
         return [], f"Couldn't find column(s) for: {', '.join(missing)}. Columns seen: {list(df.columns)}"
     rows = []
     for _, r in df.iterrows():
-        sym = clean_symbol(r[sym_col])
         qty, price = _to_num(r[qty_col]), _to_num(r[price_col])
-        if sym and qty and price and qty > 0 and price > 0:
+        if not (qty and price and qty > 0 and price > 0):
+            continue
+        sym = None
+        if isin_col is not None and not pd.isna(r[isin_col]):
+            sym = isin_to_symbol(r[isin_col])
+        if not sym and sym_col is not None:
+            sym = clean_symbol(r[sym_col])
+        if sym:
             rows.append({"symbol": sym, "qty": qty, "buy_price": round(price, 2)})
-    return rows, (None if rows else "No valid holding rows found in the file.")
+    return rows, (None if rows else "No valid holding rows found in the sheet.")
+
+
+def parse_workbook(sheets) -> tuple[list[dict[str, Any]], str | None]:
+    """Multi-sheet broker file -> rows. Tries equity-ish sheets first; skips
+    mutual-fund/SGB/bond sheets (they aren't NSE equities this app can price)."""
+    if isinstance(sheets, pd.DataFrame):
+        sheets = {"data": sheets}
+    ordered = sorted(sheets.items(),
+                     key=lambda kv: (0 if "equit" in kv[0].lower() else
+                                     2 if any(x in kv[0].lower() for x in
+                                              ("mutual", "sgb", "bond", "summary")) else 1))
+    last_err = None
+    for name, df in ordered:
+        if any(x in name.lower() for x in ("mutual", "sgb", "bond")):
+            continue
+        rows, err = parse_table(df)
+        if rows:
+            return rows, None
+        last_err = err
+    return [], last_err or "No holdings found in any sheet."
 
 
 _LINE_RE = re.compile(
