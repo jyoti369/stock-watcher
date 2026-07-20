@@ -1,3 +1,18 @@
 {
-  "70d9fa078731": "2026-07-18T07:06:34.417876+00:00"
+  "307de2dd709f": {
+    "triggered": null,
+    "state": 0
+  },
+  "70d9fa078731": {
+    "triggered": "2026-07-20T06:17:49.951132+00:00",
+    "state": 1
+  },
+  "6ec731ac920d": {
+    "triggered": null,
+    "state": 0
+  },
+  "4f8693c9f872": {
+    "triggered": null,
+    "state": 0
+  }
 }
