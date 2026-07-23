@@ -22,5 +22,11 @@
     "symbol": "INFY",
     "message": "below 200dma dip: Price vs 200-day avg (%): -21.01 < -10",
     "channels": "[\"email\"]"
+  },
+  {
+    "ts": "2026-07-23T05:52:37.248310+00:00",
+    "symbol": "INFY",
+    "message": "below 200dma dip: Price vs 200-day avg (%): -21.5 < -10",
+    "channels": "[\"email\"]"
   }
 ]
