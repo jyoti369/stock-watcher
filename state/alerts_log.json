@@ -28,5 +28,17 @@
     "symbol": "INFY",
     "message": "below 200dma dip: Price vs 200-day avg (%): -21.5 < -10",
     "channels": "[\"email\"]"
+  },
+  {
+    "ts": "2026-07-24T05:49:54.116655+00:00",
+    "symbol": "PVRINOX",
+    "message": "price above ₹1030: Last price (₹): 1043.75 > 1030.0",
+    "channels": "[\"telegram\", \"email\"]"
+  },
+  {
+    "ts": "2026-07-24T05:49:47.459272+00:00",
+    "symbol": "INFY",
+    "message": "below 200dma dip: Price vs 200-day avg (%): -23.44 < -10",
+    "channels": "[\"email\"]"
   }
 ]
