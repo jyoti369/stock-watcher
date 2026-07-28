@@ -26,8 +26,9 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 fundamentals, gh_sync, importer, portfolio, projection,
-                 repo_state, scan_history, sectors, suggestions, verdict, watcher)
+                 finance_plan, fundamentals, gh_sync, importer, portfolio,
+                 projection, repo_state, scan_history, sectors, suggestions,
+                 verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -89,7 +90,8 @@ def sync_to_github() -> tuple[bool, str]:
     repo_state.export_config()
     try:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
-                        "state/holdings.json", "state/suggestions_history.json"],
+                        "state/holdings.json", "state/suggestions_history.json",
+                        "state/finance_plan.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -211,7 +213,7 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(h["symbol"], h["exchange"]) for h in db.get_holdings()]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
-                "🔍 Stock analysis", "🔔 Alerts"])
+                "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -939,3 +941,29 @@ with tabs[4]:
                      width="stretch", hide_index=True)
     else:
         st.info("No alerts have fired yet.")
+
+# ==================================================================== plan
+with tabs[5]:
+    st.subheader("🗺️ Money plan")
+    plan = finance_plan.load_plan()
+    if not os.environ.get("STOCKWATCH_STATE_KEY"):
+        st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the plan — it is "
+                   "stored encrypted so the public repo never sees it.")
+    elif plan is None:
+        st.info("No plan saved yet. Write it below and hit Save.")
+    else:
+        st.caption(f"Last updated: {plan['updated']} · stored encrypted in the repo, "
+                   "readable only on devices holding your key")
+        st.markdown(plan["content"])
+
+    if os.environ.get("STOCKWATCH_STATE_KEY"):
+        with st.expander("✏️ Edit plan"):
+            draft = st.text_area("Markdown", value=(plan or {}).get("content", ""),
+                                 height=380, label_visibility="collapsed")
+            if st.button("Save plan"):
+                if finance_plan.save_plan(draft):
+                    auto_sync()
+                    st.toast("Plan saved & synced")
+                    st.rerun()
+                else:
+                    st.error("Couldn't save — encryption key missing.")

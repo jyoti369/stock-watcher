@@ -218,6 +218,32 @@ def test_holdings_encryption_roundtrip(tmp_path, monkeypatch):
     assert repo_state._read_holdings_raw() is None
 
 
+def test_finance_plan_roundtrip(tmp_path, monkeypatch):
+    from src import finance_plan
+    monkeypatch.setattr(finance_plan, "PLAN_JSON", tmp_path / "finance_plan.json")
+    monkeypatch.setattr(finance_plan, "STATE_DIR", tmp_path)
+
+    # no key -> refuses to write (a plaintext plan must never reach the repo)
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
+    assert finance_plan.save_plan("# secret") is False
+    assert not (tmp_path / "finance_plan.json").exists()
+
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "test-key-123")
+    assert finance_plan.save_plan("# My plan\nSIP 78k") is True
+    on_disk = (tmp_path / "finance_plan.json").read_text()
+    assert "My plan" not in on_disk and '"encrypted": true' in on_disk
+    assert finance_plan.load_plan()["content"] == "# My plan\nSIP 78k"
+
+    # unchanged content -> file not rewritten (no ciphertext churn)
+    before = on_disk
+    assert finance_plan.save_plan("# My plan\nSIP 78k") is True
+    assert (tmp_path / "finance_plan.json").read_text() == before
+
+    # wrong key -> unreadable, degrades to None
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "other-key")
+    assert finance_plan.load_plan() is None
+
+
 def test_negative_cache(monkeypatch):
     from src import datasource as ds
     ds._CACHE.clear()
