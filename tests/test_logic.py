@@ -244,6 +244,44 @@ def test_finance_plan_roundtrip(tmp_path, monkeypatch):
     assert finance_plan.load_plan() is None
 
 
+def test_mf_store_and_valuation(tmp_path, monkeypatch):
+    from src import mf
+    monkeypatch.setattr(mf, "MF_JSON", tmp_path / "mf_holdings.json")
+    monkeypatch.setattr(mf, "STATE_DIR", tmp_path)
+
+    rows = [{"name": "Parag Parikh Flexi Cap Direct", "code": "122639",
+             "units": 100.0, "invested": 8000.0, "est_value": None, "note": None},
+            {"name": "ICICI Arbitrage Direct", "code": "120364",
+             "units": None, "invested": 800000.0, "est_value": 800000.0,
+             "note": "allotting"}]
+
+    # no key -> refuses to write (real positions must never reach the repo plain)
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
+    assert mf.save_mf(rows) is False
+    assert not (tmp_path / "mf_holdings.json").exists()
+
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "test-key-123")
+    assert mf.save_mf(rows) is True
+    on_disk = (tmp_path / "mf_holdings.json").read_text()
+    assert "Parag" not in on_disk and '"encrypted": true' in on_disk
+    assert mf.load_mf() == rows
+
+    # unchanged rows -> file not rewritten (no ciphertext churn)
+    before = on_disk
+    assert mf.save_mf(list(rows)) is True
+    assert (tmp_path / "mf_holdings.json").read_text() == before
+
+    # valuation: units + NAV -> live; no units -> estimate; P&L needs invested
+    live = mf.value_row(rows[0], {"nav": 90.0, "date": "28-07-2026"})
+    assert live["value"] == 9000.0 and live["pnl"] == 1000.0
+    assert live["source"] == "live 28-07-2026" and round(live["pnl_pct"], 1) == 12.5
+    est = mf.value_row(rows[1], None)
+    assert est["value"] == 800000.0 and est["pnl"] == 0.0 and est["source"] == "estimate"
+
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "other-key")
+    assert mf.load_mf() is None
+
+
 def test_negative_cache(monkeypatch):
     from src import datasource as ds
     ds._CACHE.clear()

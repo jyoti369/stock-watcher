@@ -26,7 +26,7 @@ except Exception:
     pass
 
 from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 finance_plan, fundamentals, gh_sync, importer, portfolio,
+                 finance_plan, fundamentals, gh_sync, importer, mf, portfolio,
                  projection, repo_state, scan_history, sectors, suggestions,
                  verdict, watcher)
 from src.config import DATA_DIR
@@ -91,7 +91,7 @@ def sync_to_github() -> tuple[bool, str]:
     try:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
                         "state/holdings.json", "state/suggestions_history.json",
-                        "state/finance_plan.json"],
+                        "state/finance_plan.json", "state/mf_holdings.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -412,6 +412,144 @@ with tabs[1]:
                     db.remove_holding(h["id"])
                     auto_sync()
                     st.rerun()
+
+    # ---------------------------------------------------------- mutual funds
+    st.divider()
+    st.subheader("🪙 Mutual funds")
+    st.caption("Units × the **official AMFI NAV** (published daily by the MF industry "
+               "body — same number your fund house reports). Rows still waiting for "
+               "unit allotment show as estimates until units are filled in.")
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _nav(code: str):
+        return mf.latest_nav(code)
+
+    mf_rows = mf.load_mf()
+    if not os.environ.get("STOCKWATCH_STATE_KEY"):
+        st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the MF portfolio — "
+                   "it is stored encrypted so the public repo never sees it.")
+    elif not mf_rows:
+        st.info("No funds saved yet — add one below, or paste your Angel One MF page "
+                "into the AI import.")
+    else:
+        vrows, missing_nav = [], 0
+        for h in mf_rows:
+            nav = _nav(str(h["code"])) if h.get("code") else None
+            if h.get("code") and nav is None:
+                missing_nav += 1
+            vrows.append(mf.value_row(h, nav))
+        tot_val = sum(r["value"] for r in vrows if r["value"])
+        tot_inv = sum(r["invested"] for r in vrows if r["invested"])
+        live_n = sum(1 for r in vrows if r["source"].startswith("live"))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("MF value", inr(tot_val))
+        m2.metric("Priced live (AMFI)", f"{live_n}/{len(vrows)} funds")
+        m3.metric("Awaiting units/cost", f"{len(vrows) - live_n} rows")
+        if missing_nav:
+            st.warning(f"{missing_nav} fund(s) had no NAV this run — showing estimates.")
+        def _mf_color(x):
+            if isinstance(x, (int, float)) and not pd.isna(x):
+                return "color: #4ade80" if x > 0 else "color: #fb7185" if x < 0 else ""
+            return ""
+
+        mdf = pd.DataFrame([{
+            "Fund": r["name"], "Units": r["units"], "NAV ₹": r["nav"],
+            "Value": r["value"], "Invested": r["invested"],
+            "P&L": r["pnl"], "P&L %": r["pnl_pct"],
+            "Priced": r["source"], "Note": r["note"] or "",
+        } for r in vrows])
+        st.dataframe(
+            mdf.style.map(_mf_color, subset=["P&L", "P&L %"])
+               .format({"Units": "{:,.3f}", "NAV ₹": "₹{:,.2f}", "Value": "₹{:,.0f}",
+                        "Invested": "₹{:,.0f}", "P&L": "₹{:+,.0f}", "P&L %": "{:+.1f}%"},
+                       na_rep="—"),
+            width="stretch", hide_index=True)
+        st.caption("P&L needs the invested amount — rows without it show value only. "
+                   "The monthly CAS statement (CAMS/KFintech email) has exact units for "
+                   "every fund you own anywhere; use it to replace the estimates.")
+
+    if os.environ.get("STOCKWATCH_STATE_KEY"):
+        with st.expander("➕ Add a fund (AMFI search)"):
+            q = st.text_input("Scheme name", placeholder="parag parikh flexi",
+                              key="mf_q")
+            hits = mf.search_schemes(q) if len(q.strip()) >= 4 else []
+            if q.strip() and not hits:
+                st.caption("No match — try fewer/simpler words (the AMFI search is "
+                           "picky, e.g. 'hdfc mid cap' not 'HDFC Mid-Cap Opportunities').")
+            if hits:
+                pick = st.selectbox("Scheme", hits[:25],
+                                    format_func=lambda x: x["name"], key="mf_pick")
+                a1, a2 = st.columns(2)
+                m_units = a1.number_input("Units (0 if not yet allotted)",
+                                          min_value=0.0, step=0.001, format="%.3f")
+                m_inv = a2.number_input("Invested ₹ (0 if unknown)",
+                                        min_value=0.0, step=1000.0)
+                if st.button("Add fund", key="mf_add"):
+                    rows = mf.load_mf() or []
+                    rows.append({"name": pick["name"], "code": pick["code"],
+                                 "units": m_units or None, "invested": m_inv or None,
+                                 "est_value": m_inv or None, "note": None})
+                    if mf.save_mf(rows):
+                        auto_sync()
+                        st.toast(f"Added {pick['name']}")
+                        st.rerun()
+
+        with st.expander("📋 Import MF portfolio with AI (paste from Angel One)"):
+            st.caption("Angel One → Mutual funds → Portfolio: select-all/copy the page "
+                       "text and paste. **Replaces the whole MF list** after preview.")
+            mf_paste = st.text_area("Paste here", height=140, key="mf_paste",
+                                    label_visibility="collapsed")
+            if st.button("✨ Parse funds", key="mf_ai") and mf_paste.strip():
+                with st.spinner("Reading your paste…"):
+                    rows, err = mf.parse_mf_with_ai(mf_paste)
+                if err:
+                    st.error(err)
+                else:
+                    for r in rows:                     # match names to AMFI codes
+                        hit = mf.search_schemes(r["name"])
+                        if hit:
+                            r["code"], r["name"] = hit[0]["code"], hit[0]["name"]
+                    st.session_state["mf_preview"] = rows
+                    st.rerun()
+            mprev = st.session_state.get("mf_preview")
+            if mprev:
+                med = st.data_editor(pd.DataFrame(mprev), num_rows="dynamic",
+                                     hide_index=True, key="mf_prev_ed")
+                b1, b2 = st.columns(2)
+                if b1.button(f"✅ Replace MF list with these {len(med)} funds",
+                             type="primary", key="mf_go"):
+                    good = [r for r in med.to_dict("records") if r.get("name")]
+                    if mf.save_mf(good):
+                        del st.session_state["mf_preview"]
+                        auto_sync()
+                        st.toast(f"Imported {len(good)} funds")
+                        st.rerun()
+                if b2.button("Cancel", key="mf_cancel"):
+                    del st.session_state["mf_preview"]
+                    st.rerun()
+
+        if mf_rows:
+            with st.expander("⚙️ Edit funds (units / invested / notes)"):
+                st.caption("Fill **units** once an allotment lands (Angel One order "
+                           "detail or the CAS email shows them) — the row flips from "
+                           "estimate to live pricing.")
+                ed = st.data_editor(pd.DataFrame(mf_rows), num_rows="dynamic",
+                                    hide_index=True, key="mf_edit")
+                if st.button("Save changes", key="mf_save"):
+                    cleaned = []
+                    for r in ed.to_dict("records"):
+                        if not r.get("name"):
+                            continue
+                        for k in ("units", "invested", "est_value"):
+                            v = r.get(k)
+                            r[k] = None if (v is None or pd.isna(v) or v == 0) else float(v)
+                        r["code"] = str(r["code"]) if r.get("code") and not pd.isna(r["code"]) else None
+                        r["note"] = r.get("note") or None
+                        cleaned.append(r)
+                    if mf.save_mf(cleaned):
+                        auto_sync()
+                        st.toast("MF portfolio saved & synced")
+                        st.rerun()
 
 # ============================================================= suggestions
 with tabs[2]:
