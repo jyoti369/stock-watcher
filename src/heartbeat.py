@@ -55,7 +55,7 @@ def review_due_lines() -> list[str]:
     out = []
     for a in rows:
         if advice.due_soon(a, today):
-            when = a.get("catalyst_date") or a.get("review_by") or ""
+            when = advice.pretty_date(a.get("catalyst_date") or a.get("review_by"))
             v = verb.get(a.get("stance"), "re-examine")
             out.append(f"• {a['symbol']}: {v}" + (f" (by {when})" if when else ""))
     return out

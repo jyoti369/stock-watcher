@@ -327,6 +327,11 @@ def test_advice_alert_rules_and_due():
     assert advice.due_soon(rows[1], today) is False     # review years away
     assert advice.due_soon(rows[2], today) is False     # closed
 
+    assert advice.pretty_date("2026-08-03") == "3rd Aug, 26"
+    assert advice.pretty_date("2026-11-15") == "15th Nov, 26"
+    assert advice.pretty_date("Monday session") == "Monday session"   # non-ISO passes through
+    assert advice.pretty_date("") == "" and advice.pretty_date(None) == ""
+
 
 def test_negative_cache(monkeypatch):
     from src import datasource as ds

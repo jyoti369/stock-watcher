@@ -1135,7 +1135,7 @@ with tabs[6]:
 
         if due:
             st.info("⏰ **Time to look again:** " + ", ".join(
-                f"{a['symbol']} ({a.get('catalyst_date') or a.get('review_by')})"
+                f"{a['symbol']} ({advice.pretty_date(a.get('catalyst_date') or a.get('review_by'))})"
                 for a in due))
 
         # arm every exit band as a watcher alert, idempotently
@@ -1167,7 +1167,7 @@ with tabs[6]:
                             f"— {a.get('stance', '')}{flag}")
                 st.markdown(f"**Why:** {a.get('thesis', '')}")
                 if a.get("catalyst"):
-                    when = f" _(around {a['catalyst_date']})_" if a.get("catalyst_date") else ""
+                    when = f" _(around {advice.pretty_date(a['catalyst_date'])})_" if a.get("catalyst_date") else ""
                     st.markdown(f"**Watch for:** {a['catalyst']}{when}")
                 bands = []
                 if advice._num(a.get("sell_above")):
@@ -1178,9 +1178,9 @@ with tabs[6]:
                     st.markdown("**Exit bands:** " + " · ".join(bands))
                 foot = []
                 if a.get("review_by"):
-                    foot.append(f"review by {a['review_by']}")
+                    foot.append(f"review by {advice.pretty_date(a['review_by'])}")
                 if a.get("added"):
-                    foot.append(f"since {a['added']}")
+                    foot.append(f"since {advice.pretty_date(a['added'])}")
                 if foot:
                     st.caption(" · ".join(foot))
 
@@ -1189,7 +1189,7 @@ with tabs[6]:
                 st.dataframe(pd.DataFrame([{
                     "Symbol": a["symbol"], "Stance": a["stance"], "Why": a["thesis"],
                     "Status": a["status"], "Outcome": a.get("outcome") or "—",
-                    "Since": a.get("added"),
+                    "Since": advice.pretty_date(a.get("added")),
                 } for a in closed]), width="stretch", hide_index=True)
 
         with st.expander("✏️ Edit ledger (add / close / correct)"):

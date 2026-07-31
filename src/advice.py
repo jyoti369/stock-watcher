@@ -73,6 +73,20 @@ def _num(v):
         return None
 
 
+def pretty_date(s) -> str:
+    """'2026-08-03' -> '3rd Aug, 26'. Non-ISO text (e.g. 'Monday session') and
+    blanks pass through unchanged, so free-form notes still read fine."""
+    if not s:
+        return ""
+    try:
+        d = date.fromisoformat(str(s)[:10])
+    except (ValueError, TypeError):
+        return str(s)
+    n = d.day
+    suf = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf} {d.strftime('%b')}, {d.strftime('%y')}"
+
+
 def due_soon(entry: dict, today: date, horizon_days: int = 7) -> bool:
     """True if an OPEN call's catalyst or review date is within the horizon."""
     if entry.get("status", "OPEN") != "OPEN":
