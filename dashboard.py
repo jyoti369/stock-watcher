@@ -25,9 +25,9 @@ try:
 except Exception:
     pass
 
-from src import (advice, ai_insights, alerts, analysis, bearcase, datasource,
-                 db, finance_plan, fundamentals, gh_sync, importer, mf,
-                 portfolio, projection, repo_state, scan_history, sectors,
+from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
+                 datasource, db, finance_plan, fundamentals, gh_sync, importer,
+                 mf, portfolio, projection, repo_state, scan_history, sectors,
                  suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
@@ -214,7 +214,8 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(h["symbol"], h["exchange"]) for h in db.get_holdings()]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
-                "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice"])
+                "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice",
+                "💬 Advisor"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -1227,3 +1228,47 @@ with tabs[6]:
                     st.rerun()
                 else:
                     st.error("Couldn't save — encryption key missing.")
+
+# ================================================================= advisor
+with tabs[7]:
+    st.subheader("💬 Ask your advisor")
+    st.caption("Answers using **your** portfolio, plan and advice ledger, mixed with "
+               "**live prices + fresh news** for whatever stock you ask about. Try "
+               "\"what should I do with PVRINOX?\" or \"is my plan on track?\"")
+    if not ai_insights.available().get("gemini") and not ai_insights.available().get("openai"):
+        st.warning("No AI key set — add STOCKWATCH_GEMINI_KEY in secrets to enable the chat.")
+    elif not os.environ.get("STOCKWATCH_STATE_KEY"):
+        st.warning("Set STOCKWATCH_STATE_KEY so the advisor can read your (encrypted) data.")
+    else:
+        st.caption("🔒 Your data stays in the app; only the question plus the relevant "
+                   "figures are sent to your AI key for that one answer. Advice, not "
+                   "execution — trades are always your call.")
+        chat = st.session_state.setdefault("advisor_chat", [])
+        cc1, cc2 = st.columns([4, 1])
+        cc1.caption(f"{len(chat)//2} question(s) this session")
+        if cc2.button("Clear chat", key="adv_chat_clear") and chat:
+            st.session_state["advisor_chat"] = []
+            st.rerun()
+
+        for m in chat:
+            st.chat_message(m["role"]).markdown(m["content"])
+
+        if q := st.chat_input("Ask about a holding, the plan, or a what-if…"):
+            st.chat_message("user").markdown(q)
+            with st.chat_message("assistant"):
+                with st.spinner("reading your data, pulling live prices + news…"):
+                    res = advisor_bot.answer(q, chat)
+                if res.get("error"):
+                    st.error(res["error"])
+                    reply = None
+                else:
+                    st.markdown(res["text"])
+                    st.caption(res.get("engine", ""))
+                    if res.get("sources"):
+                        with st.expander("sources it read"):
+                            for n in res["sources"]:
+                                st.markdown(f"- [{n['title']}]({n['url']}) · {n.get('date','')}")
+                    reply = res["text"]
+            chat.append({"role": "user", "content": q})
+            if reply:
+                chat.append({"role": "assistant", "content": reply})
