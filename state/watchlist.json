@@ -1,11 +1,5 @@
 [
   {
-    "symbol": "APPL",
-    "exchange": "NSE",
-    "name": "APPL",
-    "added_at": "2026-07-31T12:46:50.348241+00:00"
-  },
-  {
     "symbol": "CDSL",
     "exchange": "NSE",
     "name": "Central Depository Services (India) Limited",
