@@ -26,8 +26,15 @@ def build_digest() -> tuple[list[str], int, int, int]:
             continue
         day = v.get("pct_change_day")
         rating = analysis.score_fundamentals(w["symbol"], w["exchange"]).get("rating")
-        day_txt = f"{day:+.1f}%" if isinstance(day, (int, float)) else "—"
-        lines.append(f"{w['symbol']}: ₹{price:,.0f} ({day_txt}) {_BADGE.get(rating, '⚪')}")
+        if isinstance(day, (int, float)):
+            arrow = "🔺" if day > 0 else "🔻" if day < 0 else "▪️"
+            day_txt = f"{arrow} {day:+.1f}%"
+        else:
+            day_txt = "—"
+        # the colour dot is BUSINESS HEALTH (fundamentals), not price direction —
+        # label it so a green dot next to a red day doesn't read as "up"
+        lines.append(f"{w['symbol']}: ₹{price:,.0f} ({day_txt}) · "
+                     f"health {_BADGE.get(rating, '⚪')}")
 
     today = datetime.now(timezone.utc).date().isoformat()
     fired_today = sum(1 for h in db.get_alert_history(limit=100) if h["ts"][:10] == today)
