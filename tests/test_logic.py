@@ -288,7 +288,8 @@ def test_advice_ledger_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(advice, "STATE_DIR", tmp_path)
 
     rows = [advice.new_entry("pvrinox", "HOLD-RULE", "bounded catalyst-wait",
-                             trigger="sell >=1240 or <=1000", review_by="2026-12-31")]
+                             catalyst="H2 box office", catalyst_date="2026-11-15",
+                             sell_above=1240, stop_below=1000, review_by="2026-12-31")]
     assert rows[0]["symbol"] == "PVRINOX" and rows[0]["status"] == "OPEN"
 
     monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
@@ -303,6 +304,28 @@ def test_advice_ledger_roundtrip(tmp_path, monkeypatch):
 
     monkeypatch.setenv("STOCKWATCH_STATE_KEY", "other-key")
     assert advice.load_advice() is None
+
+
+def test_advice_alert_rules_and_due():
+    from datetime import date
+    from src import advice
+    rows = [
+        advice.new_entry("PVR", "HOLD-RULE", "x", sell_above=1240, stop_below=1000,
+                         catalyst_date="2026-11-15"),
+        advice.new_entry("AAA", "KEEP", "y", stop_below=100, review_by="2030-01-01"),
+        advice.new_entry("BBB", "SELL", "z"),          # no bands -> no rules
+    ]
+    rows[2]["status"] = "DONE-RIGHT"                    # closed -> excluded everywhere
+    ruleset = advice.alert_rules_from(rows)
+    labels = [r["label"] for r in ruleset]
+    assert len(ruleset) == 3                            # PVR hi+lo, AAA lo
+    assert all(advice.is_advice_rule(l) for l in labels)
+    assert all(r["mode"] == "edge" for r in ruleset)
+
+    today = date(2026, 11, 10)
+    assert advice.due_soon(rows[0], today) is True      # catalyst 5 days out
+    assert advice.due_soon(rows[1], today) is False     # review years away
+    assert advice.due_soon(rows[2], today) is False     # closed
 
 
 def test_negative_cache(monkeypatch):

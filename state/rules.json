@@ -58,12 +58,12 @@
   {
     "symbol": "PVRINOX",
     "exchange": "NSE",
-    "label": "SELL trigger: exit into strength (advice ledger)",
+    "label": "exit ≥ ₹1240 · PVRINOX (advice)",
     "conditions": [
       {
         "metric": "price",
         "op": ">",
-        "value": 1240
+        "value": 1240.0
       }
     ],
     "active": 1,
@@ -72,12 +72,96 @@
   {
     "symbol": "PVRINOX",
     "exchange": "NSE",
-    "label": "STOP hit: catalyst-wait failed, sell (advice ledger)",
+    "label": "stop ≤ ₹1000 · PVRINOX (advice)",
     "conditions": [
       {
         "metric": "price",
         "op": "<",
-        "value": 1000
+        "value": 1000.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "exchange": "NSE",
+    "label": "exit ≥ ₹2900 · ASIANPAINT (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": ">",
+        "value": 2900.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "exchange": "NSE",
+    "label": "stop ≤ ₹2040 · ASIANPAINT (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": "<",
+        "value": 2040.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "INFY",
+    "exchange": "NSE",
+    "label": "stop ≤ ₹1000 · INFY (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": "<",
+        "value": 1000.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "CDSL",
+    "exchange": "NSE",
+    "label": "stop ≤ ₹1050 · CDSL (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": "<",
+        "value": 1050.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "ICICIBANK",
+    "exchange": "NSE",
+    "label": "stop ≤ ₹1150 · ICICIBANK (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": "<",
+        "value": 1150.0
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "COCHINSHIP",
+    "exchange": "NSE",
+    "label": "exit ≥ ₹1650 · COCHINSHIP (advice)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": ">",
+        "value": 1650.0
       }
     ],
     "active": 1,

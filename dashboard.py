@@ -1110,60 +1110,115 @@ with tabs[5]:
 # ================================================================== advice
 with tabs[6]:
     st.subheader("🧭 Buy/sell advice ledger")
-    st.caption("Every standing call on a holding: the stance, the one-line reason, "
-               "the trigger that would change it, and a review-by date. Closed calls "
-               "keep their outcome — this page is also the advisor's scoreboard. "
-               "Judgment under uncertainty, not predictions.")
+    st.caption("Each holding's standing call: the stance, the reason, a **catalyst** "
+               "to watch for (and when), exit bands that arm as live alerts, and a "
+               "review date. Closed calls keep their outcome — this is also the "
+               "advisor's scoreboard. Judgment under uncertainty, not predictions.")
     if not os.environ.get("STOCKWATCH_STATE_KEY"):
         st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the ledger — it is "
                    "stored encrypted so the public repo never sees it.")
     else:
+        from datetime import date as _date
         adv = advice.load_advice() or []
-        open_calls = [a for a in adv if a.get("status") == "OPEN"]
-        closed = [a for a in adv if a.get("status") != "OPEN"]
+        open_calls = [a for a in adv if a.get("status", "OPEN") == "OPEN"]
+        closed = [a for a in adv if a.get("status", "OPEN") != "OPEN"]
+        today = _date.today()
+        due = [a for a in open_calls if advice.due_soon(a, today)]
+
+        right = sum(1 for a in closed if a["status"] == "DONE-RIGHT")
+        wrong = sum(1 for a in closed if a["status"] == "DONE-WRONG")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Open calls", len(open_calls))
+        s2.metric("Due to review", len(due), "look now" if due else None)
+        s3.metric("Closed right", right)
+        s4.metric("Closed wrong", wrong)
+
+        if due:
+            st.info("⏰ **Time to look again:** " + ", ".join(
+                f"{a['symbol']} ({a.get('catalyst_date') or a.get('review_by')})"
+                for a in due))
+
+        # arm every exit band as a watcher alert, idempotently
+        ac1, ac2 = st.columns([1, 3])
+        if ac1.button("🔔 Arm all exit alerts", key="adv_arm"):
+            wanted = advice.alert_rules_from(open_calls)
+            for r in db.get_rules(active_only=False):
+                if advice.is_advice_rule(r.get("label")):
+                    db.delete_rule(r["id"])
+            for w in wanted:
+                db.add_rule(w["symbol"], w["exchange"], w["label"],
+                            w["conditions"], mode=w["mode"])
+            repo_state.export_config()
+            auto_sync()
+            st.toast(f"Armed {len(wanted)} exit alert(s) in the watcher")
+            st.rerun()
+        ac2.caption("Creates/refreshes watcher price alerts from every open call's "
+                    "sell-above / stop-below band. Safe to press again anytime — it "
+                    "replaces the old advice alerts, never duplicates.")
+
+        _ICON = {"KEEP": "🟢", "TRIM": "🟠", "SELL": "🔴", "HOLD-RULE": "🟡", "WATCH": "⚪"}
+        _ORDER = {"SELL": 0, "TRIM": 1, "HOLD-RULE": 2, "WATCH": 3, "KEEP": 4}
+        if not open_calls:
+            st.info("No open calls yet — add them in the editor below.")
+        for a in sorted(open_calls, key=lambda a: _ORDER.get(a.get("stance"), 9)):
+            flag = " · ⏰ review due" if advice.due_soon(a, today) else ""
+            with st.container(border=True):
+                st.markdown(f"### {_ICON.get(a.get('stance'), '•')} {a['symbol']} "
+                            f"— {a.get('stance', '')}{flag}")
+                st.markdown(f"**Why:** {a.get('thesis', '')}")
+                if a.get("catalyst"):
+                    when = f" _(around {a['catalyst_date']})_" if a.get("catalyst_date") else ""
+                    st.markdown(f"**Watch for:** {a['catalyst']}{when}")
+                bands = []
+                if advice._num(a.get("sell_above")):
+                    bands.append(f"sell into strength above **₹{advice._num(a['sell_above']):g}**")
+                if advice._num(a.get("stop_below")):
+                    bands.append(f"stop out below **₹{advice._num(a['stop_below']):g}**")
+                if bands:
+                    st.markdown("**Exit bands:** " + " · ".join(bands))
+                foot = []
+                if a.get("review_by"):
+                    foot.append(f"review by {a['review_by']}")
+                if a.get("added"):
+                    foot.append(f"since {a['added']}")
+                if foot:
+                    st.caption(" · ".join(foot))
+
         if closed:
-            right = sum(1 for a in closed if a["status"] == "DONE-RIGHT")
-            wrong = sum(1 for a in closed if a["status"] == "DONE-WRONG")
-            s1, s2, s3 = st.columns(3)
-            s1.metric("Open calls", len(open_calls))
-            s2.metric("Closed right", right)
-            s3.metric("Closed wrong", wrong)
-        _STANCE_ICON = {"KEEP": "🟢", "SELL": "🔴", "HOLD-RULE": "🟡", "WATCH": "⚪"}
-        if open_calls:
-            order = {"SELL": 0, "HOLD-RULE": 1, "WATCH": 2, "KEEP": 3}
-            st.dataframe(pd.DataFrame([{
-                "Stance": f"{_STANCE_ICON.get(a['stance'], '')} {a['stance']}",
-                "Symbol": a["symbol"], "Why": a["thesis"],
-                "Trigger / rule": a.get("trigger") or "—",
-                "Review by": a.get("review_by") or "—", "Since": a.get("added"),
-            } for a in sorted(open_calls, key=lambda a: order.get(a["stance"], 9))]),
-                width="stretch", hide_index=True)
-        else:
-            st.info("No open calls yet.")
-        if closed:
-            with st.expander(f"📜 Closed calls ({len(closed)})"):
+            with st.expander(f"📜 Closed calls — scoreboard ({len(closed)})"):
                 st.dataframe(pd.DataFrame([{
                     "Symbol": a["symbol"], "Stance": a["stance"], "Why": a["thesis"],
                     "Status": a["status"], "Outcome": a.get("outcome") or "—",
                     "Since": a.get("added"),
                 } for a in closed]), width="stretch", hide_index=True)
+
         with st.expander("✏️ Edit ledger (add / close / correct)"):
-            st.caption("status: OPEN · DONE-RIGHT · DONE-WRONG · DONE-MOOT — close a "
-                       "call with an outcome note instead of deleting it.")
+            st.caption("stance: KEEP · TRIM · SELL · HOLD-RULE · WATCH — "
+                       "status: OPEN · DONE-RIGHT · DONE-WRONG · DONE-MOOT. "
+                       "Close a call with an outcome note instead of deleting it. "
+                       "Dates as YYYY-MM-DD; bands are numbers (blank = none).")
             aed = st.data_editor(
                 pd.DataFrame(adv if adv else [advice.new_entry("", "WATCH", "")]),
                 num_rows="dynamic", hide_index=True, key="adv_edit",
                 column_config={
                     "stance": st.column_config.SelectboxColumn(options=advice.STANCES),
                     "status": st.column_config.SelectboxColumn(options=advice.STATUSES),
+                    "sell_above": st.column_config.NumberColumn(format="%.2f"),
+                    "stop_below": st.column_config.NumberColumn(format="%.2f"),
                 })
             if st.button("Save ledger", key="adv_save"):
                 good = []
                 for r in aed.to_dict("records"):
                     if not r.get("symbol") or not str(r.get("symbol")).strip():
                         continue
-                    r = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v)))
-                             else v) for k, v in r.items()}
+                    r = dict(r)
+                    for k in ("sell_above", "stop_below"):
+                        r[k] = advice._num(r.get(k))
+                    for k, v in list(r.items()):
+                        if k in ("sell_above", "stop_below"):
+                            continue
+                        if v is None or (isinstance(v, float) and pd.isna(v)):
+                            r[k] = ""
                     r["symbol"] = str(r["symbol"]).upper().strip()
                     good.append(r)
                 if advice.save_advice(good):
