@@ -25,6 +25,9 @@ jobs:
           STOCKWATCH_SMTP_USER: ${{ secrets.STOCKWATCH_SMTP_USER }}
           STOCKWATCH_SMTP_PASS: ${{ secrets.STOCKWATCH_SMTP_PASS }}
           STOCKWATCH_EMAIL_TO: ${{ secrets.STOCKWATCH_EMAIL_TO }}
+          # lets the digest read the encrypted advice ledger for review-due nudges;
+          # absent = that section is silently skipped, nothing else changes
+          STOCKWATCH_STATE_KEY: ${{ secrets.STOCKWATCH_STATE_KEY }}
         run: |
           python -m src.repo_state import
           python -m src.heartbeat

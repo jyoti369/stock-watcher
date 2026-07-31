@@ -7,9 +7,9 @@ goes dark, you'll see it here — so silence from the alert watcher genuinely me
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from . import alerts, analysis, db, watcher
+from . import advice, alerts, analysis, db, watcher
 
 _BADGE = {"OK": "🟢", "Mixed": "🟡", "Weak": "🔴", "Unknown": "⚪"}
 
@@ -41,6 +41,26 @@ def build_digest() -> tuple[list[str], int, int, int]:
     return lines, len(db.get_rules(active_only=True)), fired_today, unavailable
 
 
+def review_due_lines() -> list[str]:
+    """Advice-ledger calls whose catalyst/review date has arrived.
+
+    Empty when the encryption key isn't available to this run (e.g. the Action
+    without STOCKWATCH_STATE_KEY) — the ledger simply stays silent, never leaks.
+    """
+    rows = advice.load_advice()
+    if not rows:
+        return []
+    today = date.today()
+    verb = {"SELL": "action due — sell", "TRIM": "trim due", "HOLD-RULE": "decision due"}
+    out = []
+    for a in rows:
+        if advice.due_soon(a, today):
+            when = a.get("catalyst_date") or a.get("review_by") or ""
+            v = verb.get(a.get("stance"), "re-examine")
+            out.append(f"• {a['symbol']}: {v}" + (f" (by {when})" if when else ""))
+    return out
+
+
 def send_daily() -> list[str]:
     if not db.get_watchlist():
         print("[heartbeat] watchlist empty, nothing to send")
@@ -48,6 +68,9 @@ def send_daily() -> list[str]:
     lines, n_rules, n_fired, unavailable = build_digest()
     health = "healthy" if unavailable == 0 else f"⚠️ {unavailable} stock(s) had no data this run"
     body = "\n".join(lines)
+    reviews = review_due_lines()
+    if reviews:
+        body += "\n\n⏰ Advice review due:\n" + "\n".join(reviews)
     body += f"\n\nWatcher {health} · {n_rules} rule(s) active · {n_fired} alert(s) fired today."
     body += "\n\n(daily heartbeat — if you got this, the watcher is alive; silence from it means nothing triggered)"
     channels = alerts.dispatch("📊 Stock Watcher — daily digest", body)
