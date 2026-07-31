@@ -38,6 +38,9 @@ jobs:
           STOCKWATCH_SMTP_USER: ${{ secrets.STOCKWATCH_SMTP_USER }}
           STOCKWATCH_SMTP_PASS: ${{ secrets.STOCKWATCH_SMTP_PASS }}
           STOCKWATCH_EMAIL_TO: ${{ secrets.STOCKWATCH_EMAIL_TO }}
+          # required so the watcher can DECRYPT the (now encrypted) watchlist,
+          # holdings and rules at runtime; without it there are no rules to check
+          STOCKWATCH_STATE_KEY: ${{ secrets.STOCKWATCH_STATE_KEY }}
         run: |
           python -m src.repo_state import
           python -m src.watcher

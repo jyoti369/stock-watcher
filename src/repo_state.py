@@ -55,39 +55,63 @@ def _fernet():
     return Fernet(key)
 
 
-def _write_holdings(data: list) -> None:
-    plaintext = json.dumps(data, ensure_ascii=False)
+def _read_maybe_enc(path: Path, default):
+    """Read a state file that may be Fernet ciphertext or legacy plaintext.
+
+    Returns `default` when the file is missing, or when it's encrypted and no
+    (or the wrong) key is available — so a keyless run degrades safely instead
+    of crashing, and never sees private contents.
+    """
+    try:
+        raw = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+    if isinstance(raw, dict) and raw.get("encrypted"):
+        f = _fernet()
+        if f is None:
+            return default
+        try:
+            return json.loads(f.decrypt(raw["cipher"].encode()).decode())
+        except Exception:
+            return default
+    return raw                                         # legacy plaintext
+
+
+def _write_private(path: Path, data) -> bool:
+    """Write JSON encrypted with the state key. With NO key this refuses to
+    write (returns False) — private data must never reach the public repo as
+    plaintext. Skips the rewrite when the decrypted content is unchanged, so
+    Fernet's per-call randomness doesn't create pointless commits.
+    """
     f = _fernet()
     if f is None:
-        _write(HOLDINGS_JSON, data)                    # no key -> legacy plaintext
-        return
-    # Fernet tokens differ per encryption; avoid pointless commits by skipping
-    # the rewrite when the decrypted current file already matches.
-    current = _read_holdings_raw()
-    if current is not None and json.dumps(current, ensure_ascii=False) == plaintext:
-        return
+        return False
+    plaintext = json.dumps(data, ensure_ascii=False)
+    # Skip the rewrite only when the file is ALREADY an encrypted envelope whose
+    # decrypted content matches — otherwise a legacy plaintext file with matching
+    # content would never get migrated to ciphertext.
+    try:
+        raw = json.loads(path.read_text())
+        is_env = isinstance(raw, dict) and raw.get("encrypted")
+    except (FileNotFoundError, json.JSONDecodeError):
+        is_env = False
+    if is_env:
+        current = _read_maybe_enc(path, None)
+        if current is not None and json.dumps(current, ensure_ascii=False) == plaintext:
+            return True
     STATE_DIR.mkdir(exist_ok=True)
-    HOLDINGS_JSON.write_text(json.dumps(
+    path.write_text(json.dumps(
         {"encrypted": True, "cipher": f.encrypt(plaintext.encode()).decode()}))
+    return True
+
+
+def _write_holdings(data: list) -> None:
+    _write_private(HOLDINGS_JSON, data)
 
 
 def _read_holdings_raw() -> list | None:
     """Decrypt-or-parse holdings.json. None if unreadable (no key / bad key)."""
-    try:
-        raw = json.loads(HOLDINGS_JSON.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-    if isinstance(raw, list):                          # legacy plaintext
-        return raw
-    if isinstance(raw, dict) and raw.get("encrypted"):
-        f = _fernet()
-        if f is None:
-            return None
-        try:
-            return json.loads(f.decrypt(raw["cipher"].encode()).decode())
-        except Exception:
-            return None
-    return None
+    return _read_maybe_enc(HOLDINGS_JSON, None)
 
 
 def rule_key(r: dict) -> str:
@@ -100,13 +124,16 @@ def rule_key(r: dict) -> str:
 # ---- called by the LOCAL dashboard whenever watchlist/rules change ---------
 
 def export_config() -> None:
-    _write(WATCHLIST_JSON, db.get_watchlist())
+    # All three describe the portfolio (symbols, lots, and — via advice-armed
+    # rules — exit/stop price targets), so all three are written encrypted. The
+    # watcher Action holds the key and decrypts them at runtime.
+    _write_private(WATCHLIST_JSON, db.get_watchlist())
     _write_holdings([
         {"symbol": h["symbol"], "exchange": h["exchange"], "qty": h["qty"],
          "buy_price": h["buy_price"], "buy_date": h.get("buy_date")}
         for h in db.get_holdings()
     ])
-    _write(RULES_JSON, [
+    _write_private(RULES_JSON, [
         {"symbol": r["symbol"], "exchange": r["exchange"], "label": r.get("label"),
          "conditions": r["conditions"], "active": r["active"], "mode": r.get("mode", "level")}
         for r in db.get_rules(active_only=False)
@@ -123,7 +150,7 @@ def import_from_repo() -> None:
         conn.execute("DELETE FROM alert_rules")
         conn.execute("DELETE FROM holdings")
 
-    for w in _read(WATCHLIST_JSON, []):
+    for w in _read_maybe_enc(WATCHLIST_JSON, []):
         db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"))
 
     for h in (_read_holdings_raw() or []):             # [] if encrypted and no key (e.g. the Action)
@@ -131,7 +158,7 @@ def import_from_repo() -> None:
                        h["qty"], h["buy_price"], h.get("buy_date"))
 
     saved = _read(ALERT_STATE_JSON, {})
-    for r in _read(RULES_JSON, []):
+    for r in _read_maybe_enc(RULES_JSON, []):
         if not r.get("active", 1):
             continue
         rid = db.add_rule(r["symbol"], r.get("exchange", "NSE"),
@@ -156,14 +183,15 @@ def export_state() -> None:
         for r in rules if r.get("last_triggered") or r.get("last_state") is not None
     })
 
-    log = _read(ALERTS_LOG_JSON, [])
+    log = _read_maybe_enc(ALERTS_LOG_JSON, [])
     seen = {(e["ts"], e["message"]) for e in log}
     for h in db.get_alert_history(limit=100):
         key = (h["ts"], h["message"])
         if key not in seen:
             log.append({"ts": h["ts"], "symbol": h["symbol"],
                         "message": h["message"], "channels": h["channels"]})
-    _write(ALERTS_LOG_JSON, log[-200:])          # keep the last 200
+    # fired messages name holdings + live prices, so encrypt (the Action has the key)
+    _write_private(ALERTS_LOG_JSON, log[-200:])  # keep the last 200
 
 
 if __name__ == "__main__":

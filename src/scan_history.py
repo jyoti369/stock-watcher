@@ -11,21 +11,17 @@ honest and teaches you how much to trust it.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from .repo_state import STATE_DIR
+from .repo_state import STATE_DIR, _read_maybe_enc, _write_private
 
 HISTORY_JSON = STATE_DIR / "suggestions_history.json"
 MAX_SCANS = 20
 
 
 def load() -> list[dict[str, Any]]:
-    """Newest first. [] if no history yet."""
-    try:
-        return json.loads(HISTORY_JSON.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    """Newest first. [] if no history yet (or encrypted with no key available)."""
+    return _read_maybe_enc(HISTORY_JSON, [])
 
 
 def append(ts: str, params: dict, ranked: list[dict], stances: dict[str, str]) -> None:
@@ -45,9 +41,8 @@ def append(ts: str, params: dict, ranked: list[dict], stances: dict[str, str]) -
         })
     scans = load()
     scans.insert(0, {"ts": ts, "params": params, "picks": picks})
-    STATE_DIR.mkdir(exist_ok=True)
-    HISTORY_JSON.write_text(json.dumps(scans[:MAX_SCANS], indent=1, ensure_ascii=False))
+    _write_private(HISTORY_JSON, scans[:MAX_SCANS])    # encrypted (leaks symbols/amounts)
 
 
 def clear() -> None:
-    HISTORY_JSON.write_text("[]")
+    _write_private(HISTORY_JSON, [])

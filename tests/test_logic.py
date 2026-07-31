@@ -137,6 +137,7 @@ def test_scan_history_roundtrip(tmp_path, monkeypatch):
     from src import scan_history
     monkeypatch.setattr(scan_history, "HISTORY_JSON", tmp_path / "hist.json")
     monkeypatch.setattr(scan_history, "STATE_DIR", tmp_path)
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k")   # history is encrypted at rest now
     ranked = [{"symbol": "TCS", "name": "Tata Consultancy", "score": 71,
                "health": {"rating": "OK", "score": 80}, "price": 2269.0,
                "analyst": {"target": 2500.0}}]
@@ -216,6 +217,31 @@ def test_holdings_encryption_roundtrip(tmp_path, monkeypatch):
     assert repo_state._read_holdings_raw() is None
     monkeypatch.delenv("STOCKWATCH_STATE_KEY")
     assert repo_state._read_holdings_raw() is None
+
+
+def test_write_private_migrates_and_refuses(tmp_path, monkeypatch):
+    import json
+    from src import repo_state
+    monkeypatch.setattr(repo_state, "STATE_DIR", tmp_path)
+    p = tmp_path / "rules.json"
+    data = [{"symbol": "PVRINOX", "conditions": [{"metric": "price", "value": 1240}]}]
+
+    # no key -> refuse, never leave private plaintext behind
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
+    assert repo_state._write_private(p, data) is False and not p.exists()
+
+    # a legacy PLAINTEXT file with identical content must still get migrated
+    p.write_text(json.dumps(data))
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k1")
+    assert repo_state._write_private(p, data) is True
+    txt = p.read_text()
+    assert "PVRINOX" not in txt and "1240" not in txt and '"encrypted": true' in txt
+    assert repo_state._read_maybe_enc(p, None) == data
+
+    # already-encrypted + unchanged -> not rewritten (no churn)
+    before = p.read_text()
+    assert repo_state._write_private(p, data) is True
+    assert p.read_text() == before
 
 
 def test_finance_plan_roundtrip(tmp_path, monkeypatch):
