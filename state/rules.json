@@ -54,5 +54,33 @@
     ],
     "active": 1,
     "mode": "edge"
+  },
+  {
+    "symbol": "PVRINOX",
+    "exchange": "NSE",
+    "label": "SELL trigger: exit into strength (advice ledger)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": ">",
+        "value": 1240
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
+  },
+  {
+    "symbol": "PVRINOX",
+    "exchange": "NSE",
+    "label": "STOP hit: catalyst-wait failed, sell (advice ledger)",
+    "conditions": [
+      {
+        "metric": "price",
+        "op": "<",
+        "value": 1000
+      }
+    ],
+    "active": 1,
+    "mode": "edge"
   }
 ]

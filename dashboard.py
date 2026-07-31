@@ -25,10 +25,10 @@ try:
 except Exception:
     pass
 
-from src import (ai_insights, alerts, analysis, bearcase, datasource, db,
-                 finance_plan, fundamentals, gh_sync, importer, mf, portfolio,
-                 projection, repo_state, scan_history, sectors, suggestions,
-                 verdict, watcher)
+from src import (advice, ai_insights, alerts, analysis, bearcase, datasource,
+                 db, finance_plan, fundamentals, gh_sync, importer, mf,
+                 portfolio, projection, repo_state, scan_history, sectors,
+                 suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -91,7 +91,8 @@ def sync_to_github() -> tuple[bool, str]:
     try:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
                         "state/holdings.json", "state/suggestions_history.json",
-                        "state/finance_plan.json", "state/mf_holdings.json"],
+                        "state/finance_plan.json", "state/mf_holdings.json",
+                        "state/advice.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -213,7 +214,7 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(h["symbol"], h["exchange"]) for h in db.get_holdings()]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
-                "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan"])
+                "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -1102,6 +1103,72 @@ with tabs[5]:
                 if finance_plan.save_plan(draft):
                     auto_sync()
                     st.toast("Plan saved & synced")
+                    st.rerun()
+                else:
+                    st.error("Couldn't save — encryption key missing.")
+
+# ================================================================== advice
+with tabs[6]:
+    st.subheader("🧭 Buy/sell advice ledger")
+    st.caption("Every standing call on a holding: the stance, the one-line reason, "
+               "the trigger that would change it, and a review-by date. Closed calls "
+               "keep their outcome — this page is also the advisor's scoreboard. "
+               "Judgment under uncertainty, not predictions.")
+    if not os.environ.get("STOCKWATCH_STATE_KEY"):
+        st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the ledger — it is "
+                   "stored encrypted so the public repo never sees it.")
+    else:
+        adv = advice.load_advice() or []
+        open_calls = [a for a in adv if a.get("status") == "OPEN"]
+        closed = [a for a in adv if a.get("status") != "OPEN"]
+        if closed:
+            right = sum(1 for a in closed if a["status"] == "DONE-RIGHT")
+            wrong = sum(1 for a in closed if a["status"] == "DONE-WRONG")
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Open calls", len(open_calls))
+            s2.metric("Closed right", right)
+            s3.metric("Closed wrong", wrong)
+        _STANCE_ICON = {"KEEP": "🟢", "SELL": "🔴", "HOLD-RULE": "🟡", "WATCH": "⚪"}
+        if open_calls:
+            order = {"SELL": 0, "HOLD-RULE": 1, "WATCH": 2, "KEEP": 3}
+            st.dataframe(pd.DataFrame([{
+                "Stance": f"{_STANCE_ICON.get(a['stance'], '')} {a['stance']}",
+                "Symbol": a["symbol"], "Why": a["thesis"],
+                "Trigger / rule": a.get("trigger") or "—",
+                "Review by": a.get("review_by") or "—", "Since": a.get("added"),
+            } for a in sorted(open_calls, key=lambda a: order.get(a["stance"], 9))]),
+                width="stretch", hide_index=True)
+        else:
+            st.info("No open calls yet.")
+        if closed:
+            with st.expander(f"📜 Closed calls ({len(closed)})"):
+                st.dataframe(pd.DataFrame([{
+                    "Symbol": a["symbol"], "Stance": a["stance"], "Why": a["thesis"],
+                    "Status": a["status"], "Outcome": a.get("outcome") or "—",
+                    "Since": a.get("added"),
+                } for a in closed]), width="stretch", hide_index=True)
+        with st.expander("✏️ Edit ledger (add / close / correct)"):
+            st.caption("status: OPEN · DONE-RIGHT · DONE-WRONG · DONE-MOOT — close a "
+                       "call with an outcome note instead of deleting it.")
+            aed = st.data_editor(
+                pd.DataFrame(adv if adv else [advice.new_entry("", "WATCH", "")]),
+                num_rows="dynamic", hide_index=True, key="adv_edit",
+                column_config={
+                    "stance": st.column_config.SelectboxColumn(options=advice.STANCES),
+                    "status": st.column_config.SelectboxColumn(options=advice.STATUSES),
+                })
+            if st.button("Save ledger", key="adv_save"):
+                good = []
+                for r in aed.to_dict("records"):
+                    if not r.get("symbol") or not str(r.get("symbol")).strip():
+                        continue
+                    r = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v)))
+                             else v) for k, v in r.items()}
+                    r["symbol"] = str(r["symbol"]).upper().strip()
+                    good.append(r)
+                if advice.save_advice(good):
+                    auto_sync()
+                    st.toast("Ledger saved & synced")
                     st.rerun()
                 else:
                     st.error("Couldn't save — encryption key missing.")

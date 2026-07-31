@@ -282,6 +282,29 @@ def test_mf_store_and_valuation(tmp_path, monkeypatch):
     assert mf.load_mf() is None
 
 
+def test_advice_ledger_roundtrip(tmp_path, monkeypatch):
+    from src import advice
+    monkeypatch.setattr(advice, "ADVICE_JSON", tmp_path / "advice.json")
+    monkeypatch.setattr(advice, "STATE_DIR", tmp_path)
+
+    rows = [advice.new_entry("pvrinox", "HOLD-RULE", "bounded catalyst-wait",
+                             trigger="sell >=1240 or <=1000", review_by="2026-12-31")]
+    assert rows[0]["symbol"] == "PVRINOX" and rows[0]["status"] == "OPEN"
+
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
+    assert advice.save_advice(rows) is False           # no key -> never written plain
+    assert not (tmp_path / "advice.json").exists()
+
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "test-key-123")
+    assert advice.save_advice(rows) is True
+    on_disk = (tmp_path / "advice.json").read_text()
+    assert "PVRINOX" not in on_disk and '"encrypted": true' in on_disk
+    assert advice.load_advice() == rows
+
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "other-key")
+    assert advice.load_advice() is None
+
+
 def test_negative_cache(monkeypatch):
     from src import datasource as ds
     ds._CACHE.clear()
