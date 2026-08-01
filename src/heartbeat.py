@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from . import advice, alerts, analysis, db, watcher
+from . import advice, alerts, analysis, db, reminders, watcher
 
 _BADGE = {"OK": "🟢", "Mixed": "🟡", "Weak": "🔴", "Unknown": "⚪"}
 
@@ -61,6 +61,21 @@ def review_due_lines() -> list[str]:
     return out
 
 
+def reminder_due_lines() -> list[str]:
+    """Dated reminders arriving within a week (empty without the key)."""
+    rows = reminders.load()
+    if not rows:
+        return []
+    today = date.today()
+    out = []
+    for r in rows:
+        if reminders.due(r, today):
+            eff = reminders.effective_date(r, today)
+            when = advice.pretty_date(eff.isoformat()) if eff else ""
+            out.append(f"• {r['text']}" + (f" (by {when})" if when else ""))
+    return out
+
+
 def send_daily() -> list[str]:
     if not db.get_watchlist():
         print("[heartbeat] watchlist empty, nothing to send")
@@ -71,6 +86,9 @@ def send_daily() -> list[str]:
     reviews = review_due_lines()
     if reviews:
         body += "\n\n⏰ Advice review due:\n" + "\n".join(reviews)
+    rem = reminder_due_lines()
+    if rem:
+        body += "\n\n📅 Reminders due:\n" + "\n".join(rem)
     body += f"\n\nWatcher {health} · {n_rules} rule(s) active · {n_fired} alert(s) fired today."
     body += "\n\n(daily heartbeat — if you got this, the watcher is alive; silence from it means nothing triggered)"
     channels = alerts.dispatch("📊 Stock Watcher — daily digest", body)

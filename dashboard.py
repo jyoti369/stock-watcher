@@ -27,8 +27,8 @@ except Exception:
 
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
                  datasource, db, finance_plan, fundamentals, gh_sync, importer,
-                 mf, portfolio, projection, repo_state, scan_history, sectors,
-                 suggestions, verdict, watcher)
+                 mf, portfolio, projection, reminders, repo_state, scan_history,
+                 sectors, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -92,7 +92,7 @@ def sync_to_github() -> tuple[bool, str]:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
                         "state/holdings.json", "state/suggestions_history.json",
                         "state/finance_plan.json", "state/mf_holdings.json",
-                        "state/advice.json"],
+                        "state/advice.json", "state/reminders.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -1120,6 +1120,52 @@ with tabs[5]:
                             st.rerun()
 
     if os.environ.get("STOCKWATCH_STATE_KEY"):
+        from datetime import date as _rdate
+        st.divider()
+        st.markdown("### 📅 Reminders")
+        rlist = reminders.load() or []
+        _rtoday = _rdate.today()
+        rsorted = sorted(rlist, key=lambda r: (reminders.effective_date(r, _rtoday) or _rdate.max))
+        due_now = [r for r in rsorted if reminders.due(r, _rtoday)]
+        if due_now:
+            st.info("⏰ **Due now:** " + " · ".join(
+                f"{r['text']} ({advice.pretty_date(reminders.effective_date(r, _rtoday).isoformat())})"
+                for r in due_now))
+        if rsorted:
+            for r in rsorted:
+                eff = reminders.effective_date(r, _rtoday)
+                when = advice.pretty_date(eff.isoformat()) if eff else "?"
+                tag = " · every year" if r.get("yearly") else ""
+                flag = " ⏰" if reminders.due(r, _rtoday) else ""
+                st.markdown(f"- **{when}**{tag} — {r['text']}{flag}")
+        else:
+            st.caption("No reminders yet. Add one below (e.g. the April PPF top-up).")
+        with st.expander("➕ Add / manage reminders"):
+            with st.form("add_reminder", clear_on_submit=True):
+                rc1, rc2, rc3 = st.columns([3, 1.3, 1])
+                r_text = rc1.text_input("What to remember",
+                                        placeholder="Deposit ₹1.5L into PPF")
+                r_date = rc2.date_input("Date", format="DD/MM/YYYY")
+                r_yearly = rc3.checkbox("Every year")
+                if st.form_submit_button("Add reminder") and r_text.strip():
+                    rlist.append(reminders.new(r_text.strip(), r_date.isoformat(), r_yearly))
+                    if reminders.save(rlist):
+                        auto_sync()
+                        st.toast("Reminder added")
+                        st.rerun()
+            if rsorted:
+                st.caption("Remove or mark a one-off done:")
+                for i, r in enumerate(rsorted):
+                    q1, q2, q3 = st.columns([4, 1, 1])
+                    eff = reminders.effective_date(r, _rtoday)
+                    q1.write(f"{advice.pretty_date(eff.isoformat()) if eff else '?'} — {r['text']}")
+                    if not r.get("yearly") and q2.button("Done", key=f"rem_done_{i}"):
+                        r["done"] = True
+                        reminders.save(rlist); auto_sync(); st.rerun()
+                    if q3.button("Remove", key=f"rem_del_{i}"):
+                        rlist.remove(r)
+                        reminders.save(rlist); auto_sync(); st.rerun()
+
         with st.expander("✏️ Edit plan"):
             draft = st.text_area("Markdown", value=(plan or {}).get("content", ""),
                                  height=380, label_visibility="collapsed")

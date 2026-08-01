@@ -270,6 +270,34 @@ def test_finance_plan_roundtrip(tmp_path, monkeypatch):
     assert finance_plan.load_plan() is None
 
 
+def test_reminders_yearly_and_due(tmp_path, monkeypatch):
+    from datetime import date
+    from src import reminders
+    monkeypatch.setattr(reminders, "REMINDERS_JSON", tmp_path / "reminders.json")
+    monkeypatch.setattr(reminders, "STATE_DIR", tmp_path)
+
+    ppf = reminders.new("PPF 1.5L", "2027-04-01", yearly=True)
+    once = reminders.new("FD matures", "2026-08-05")
+
+    # yearly rolls to the upcoming Apr 1 regardless of stored year
+    assert reminders.effective_date(ppf, date(2026, 8, 1)) == date(2027, 4, 1)
+    assert reminders.effective_date(ppf, date(2027, 6, 1)) == date(2028, 4, 1)
+    # due only inside the 7-day window; one-off overdue still counts
+    assert reminders.due(ppf, date(2027, 3, 28)) is True
+    assert reminders.due(ppf, date(2027, 1, 1)) is False
+    assert reminders.due(once, date(2026, 8, 1)) is True          # 4 days out
+    once["done"] = True
+    assert reminders.due(once, date(2026, 8, 1)) is False         # done one-off drops
+
+    # no key -> refuse to write private data
+    monkeypatch.delenv("STOCKWATCH_STATE_KEY", raising=False)
+    assert reminders.save([ppf]) is False and not (tmp_path / "reminders.json").exists()
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k1")
+    assert reminders.save([ppf]) is True
+    assert "PPF" not in (tmp_path / "reminders.json").read_text()  # ciphertext only
+    assert reminders.load() == [ppf]
+
+
 def test_plan_checklist_toggle():
     from src import finance_plan
     content = ("## Pending\n- [ ] open PPF\n- [x] SIPs live\nsome prose\n"
