@@ -1096,6 +1096,23 @@ with tabs[5]:
                    "readable only on devices holding your key")
         st.markdown(plan["content"])
 
+        items = finance_plan.checklist_items(plan["content"])
+        if items:
+            done_n = sum(1 for it in items if it["done"])
+            with st.expander(f"✅ Checklist — tap to mark done ({done_n}/{len(items)})",
+                             expanded=done_n < len(items)):
+                st.caption("Tapping a box updates the plan directly and syncs — no AI in "
+                           "between, so what you see is what's saved. Untick to reopen.")
+                for it in items:
+                    new = st.checkbox(it["text"], value=it["done"],
+                                      key=f"plan_chk_{it['line']}")
+                    if new != it["done"]:
+                        updated = finance_plan.set_check(plan["content"], it["line"], new)
+                        if finance_plan.save_plan(updated):
+                            auto_sync()
+                            st.toast(("Done: " if new else "Reopened: ") + it["text"][:40])
+                            st.rerun()
+
     if os.environ.get("STOCKWATCH_STATE_KEY"):
         with st.expander("✏️ Edit plan"):
             draft = st.text_area("Markdown", value=(plan or {}).get("content", ""),

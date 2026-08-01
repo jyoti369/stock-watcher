@@ -9,11 +9,40 @@ personal plan must not reach a public repo by accident.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 
 from .repo_state import STATE_DIR, _fernet
 
 PLAN_JSON = STATE_DIR / "finance_plan.json"
+
+_CHECK = re.compile(r"^(\s*[-*]\s*\[)([ xX])(\]\s*)(.*)$")
+
+
+def checklist_items(content: str) -> list[dict]:
+    """Every markdown checkbox line: {line: int, text: str, done: bool}."""
+    out = []
+    for i, ln in enumerate(content.splitlines()):
+        m = _CHECK.match(ln)
+        if m:
+            out.append({"line": i, "text": m.group(4).strip(),
+                        "done": m.group(2).lower() == "x"})
+    return out
+
+
+def set_check(content: str, line: int, done: bool) -> str:
+    """Flip one checkbox (by line index) to done/undone; content unchanged if the
+    line isn't a checkbox. Rewrites only that line, so the rest of the plan and
+    its formatting are untouched."""
+    lines = content.splitlines()
+    if not (0 <= line < len(lines)):
+        return content
+    m = _CHECK.match(lines[line])
+    if not m:
+        return content
+    lines[line] = f"{m.group(1)}{'x' if done else ' '}{m.group(3)}{m.group(4)}"
+    trailing = "\n" if content.endswith("\n") else ""
+    return "\n".join(lines) + trailing
 
 
 def load_plan() -> dict | None:

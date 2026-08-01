@@ -270,6 +270,22 @@ def test_finance_plan_roundtrip(tmp_path, monkeypatch):
     assert finance_plan.load_plan() is None
 
 
+def test_plan_checklist_toggle():
+    from src import finance_plan
+    content = ("## Pending\n- [ ] open PPF\n- [x] SIPs live\nsome prose\n"
+               "  - [ ] nested task\n")
+    items = finance_plan.checklist_items(content)
+    assert [i["done"] for i in items] == [False, True, False]
+    assert items[0]["text"] == "open PPF" and items[0]["line"] == 1
+
+    done = finance_plan.set_check(content, 1, True)
+    assert "- [x] open PPF" in done and done.endswith("\n")   # trailing newline kept
+    assert finance_plan.checklist_items(done)[0]["done"] is True
+    # untick, and non-checkbox line is a no-op
+    assert "- [ ] open PPF" in finance_plan.set_check(done, 1, False)
+    assert finance_plan.set_check(content, 3, True) == content   # 'some prose' unchanged
+
+
 def test_mf_store_and_valuation(tmp_path, monkeypatch):
     from src import mf
     monkeypatch.setattr(mf, "MF_JSON", tmp_path / "mf_holdings.json")
