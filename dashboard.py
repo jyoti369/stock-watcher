@@ -1096,7 +1096,13 @@ with tabs[5]:
                    "readable only on devices holding your key")
         st.markdown(plan["content"])
 
-        items = finance_plan.checklist_items(plan["content"])
+        # Guarded so a transient deploy hiccup here can't white-screen every tab
+        # (Streamlit runs all tab bodies on each render).
+        try:
+            items = finance_plan.checklist_items(plan["content"])
+        except AttributeError:
+            items = []
+            st.caption("Checklist is loading a fresh deploy — reload in a moment.")
         if items:
             done_n = sum(1 for it in items if it["done"])
             with st.expander(f"✅ Checklist — tap to mark done ({done_n}/{len(items)})",
