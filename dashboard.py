@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from datetime import datetime
 
 import pandas as pd
@@ -34,6 +35,24 @@ from src.config import DATA_DIR
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
 
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
+
+# --- update feel -----------------------------------------------------------
+# Streamlit's default is to grey out the whole page and spin a "running" badge
+# on every rerun, which makes a one-tap checkbox look like a page load. Modern
+# apps update in place instead. Two halves to that: heavy writes moved off the
+# click path (see auto_sync below) and this, which stops the visual flicker —
+# stale content stays fully visible and readable while the new value arrives.
+st.markdown("""
+<style>
+  [data-testid="stStatusWidget"] { display: none !important; }
+  [data-testid="stAppDeployButton"] { display: none !important; }
+  .stApp [data-stale="true"], .stApp .element-container[data-stale="true"] {
+      opacity: 1 !important; transition: none !important; filter: none !important; }
+  [data-testid="stAppViewContainer"] { transition: none !important; }
+  /* toasts read as the confirmation, so make them easy to catch */
+  [data-testid="stToast"] { font-size: 0.95rem; }
+</style>
+""", unsafe_allow_html=True)
 
 
 def _require_password() -> None:
@@ -107,19 +126,41 @@ def sync_to_github() -> tuple[bool, str]:
         return False, (e.stderr or b"").decode()[:200] if isinstance(e.stderr, bytes) else str(e)
 
 
+# Background sync: the local export is instant (disk), but the GitHub push is a
+# network round-trip that used to run inline on every tap — that wait WAS the
+# lag you felt. Now the click returns as soon as state hits disk and the push
+# happens on a worker thread. _SYNC_LOCK serialises pushes (git can't run two at
+# once) and _sync_status carries the result back for the sidebar to show.
+_SYNC_LOCK = threading.Lock()
+_sync_status: dict[str, str] = {"state": "idle", "msg": ""}
+
+
+def _push_worker() -> None:
+    """Runs off the UI thread. Never touches st.* — only the status dict."""
+    with _SYNC_LOCK:
+        _sync_status.update(state="syncing", msg="")
+        ok, msg = sync_to_github()
+        if not ok and gh_sync.available():
+            ok, msg = gh_sync.push_state()
+        _sync_status.update(state="ok" if ok else "failed", msg=msg)
+
+
 def auto_sync() -> None:
-    """Export state and quietly push it to GitHub so the 24/7 watcher stays current.
-    Tries `git push` first (local); where that's impossible (Streamlit Cloud) it
-    falls back to the GitHub API if a token is configured. Only gives up for the
-    session when both paths fail — the manual sidebar button stays as fallback."""
+    """Save state now, push to GitHub in the background.
+
+    Export is synchronous so what's on disk always matches what you just did
+    (and a later manual sync can't lose it). The push is fire-and-forget, so no
+    interaction ever blocks on the network.
+    """
     repo_state.export_config()
     if st.session_state.get("_autosync_dead"):
         return
-    ok, _ = sync_to_github()
-    if not ok and gh_sync.available():
-        ok, _ = gh_sync.push_state()
-    if not ok:
+    if _sync_status.get("state") == "failed":
+        # one hard failure is usually config (no token/remote); stop retrying on
+        # every tap and let the sidebar button handle it explicitly
         st.session_state["_autosync_dead"] = True
+        return
+    threading.Thread(target=_push_worker, daemon=True).start()
 
 
 def monte_carlo_block(symbol, exchange, years, amount, period_label):
@@ -184,11 +225,22 @@ with st.sidebar:
     st.caption("Data caches ~15 min; refresh to force fresh prices/fundamentals.")
 
     if st.button("⬆️ Sync watchlist/rules to GitHub", width="stretch"):
-        ok, msg = sync_to_github()
-        if not ok and gh_sync.available():
-            ok, msg = gh_sync.push_state()
+        st.session_state["_autosync_dead"] = False
+        with st.spinner("Pushing…"):
+            ok, msg = sync_to_github()
+            if not ok and gh_sync.available():
+                ok, msg = gh_sync.push_state()
+        _sync_status.update(state="ok" if ok else "failed", msg=msg)
         st.toast(("✅ " if ok else "⚠️ ") + msg)
-    if gh_sync.available():
+    _ss = _sync_status.get("state")
+    if _ss == "syncing":
+        st.caption("🔄 Saving to GitHub in the background…")
+    elif _ss == "failed":
+        st.caption(f"⚠️ Last sync failed: {_sync_status.get('msg', '')[:80]} — "
+                   "changes are saved locally; hit the button to retry.")
+    elif _ss == "ok":
+        st.caption(f"🟢 Saved to GitHub · {_sync_status.get('msg', '')[:60]}")
+    elif gh_sync.available():
         st.caption("🟢 Changes auto-save to GitHub (works from your phone too).")
     else:
         st.caption("Auto-sync works locally via git. To make changes from the hosted app "
@@ -207,6 +259,192 @@ def _warm_caches(pairs: list[tuple[str, str]]) -> None:
             list(ex.map(lambda p: watcher.gather_values(p[0], p[1]), pairs))
     except Exception:
         pass
+
+
+# --- fragments -------------------------------------------------------------
+# A plain st.rerun() re-executes this whole file — all eight tab bodies, every
+# price loop — just to flip one checkbox. @st.fragment reruns ONLY the function
+# below, so these interactions feel instant and the rest of the page never
+# blinks. Each fragment reloads the data it owns, so it stays self-consistent.
+
+@st.fragment
+def plan_body_fragment() -> None:
+    """The plan markdown + its tappable checklist, updating in place."""
+    plan = finance_plan.load_plan()
+    if plan is None:
+        st.info("No plan saved yet. Write it below and hit Save.")
+        return
+    st.caption(f"Last updated: {plan['updated']} · stored encrypted in the repo, "
+               "readable only on devices holding your key")
+    st.markdown(plan["content"])
+
+    # Guarded so a transient deploy hiccup here can't white-screen every tab
+    # (Streamlit runs all tab bodies on each render).
+    try:
+        items = finance_plan.checklist_items(plan["content"])
+    except AttributeError:
+        st.caption("Checklist is loading a fresh deploy — reload in a moment.")
+        return
+    if not items:
+        return
+    done_n = sum(1 for it in items if it["done"])
+    with st.expander(f"✅ Checklist — tap to mark done ({done_n}/{len(items)})",
+                     expanded=done_n < len(items)):
+        st.caption("Tapping a box updates the plan directly and syncs — no AI in "
+                   "between, so what you see is what's saved. Untick to reopen.")
+        for it in items:
+            new = st.checkbox(it["text"], value=it["done"], key=f"plan_chk_{it['line']}")
+            if new != it["done"]:
+                updated = finance_plan.set_check(plan["content"], it["line"], new)
+                if finance_plan.save_plan(updated):
+                    auto_sync()
+                    st.toast(("Done: " if new else "Reopened: ") + it["text"][:40])
+                    st.rerun(scope="fragment")
+
+
+@st.fragment
+def reminders_fragment() -> None:
+    """Reminder list + add/done/remove, all without a full-page rerun."""
+    from datetime import date as _rdate
+    st.markdown("### 📅 Reminders")
+    rlist = reminders.load() or []
+    _rtoday = _rdate.today()
+    rsorted = sorted(rlist, key=lambda r: (reminders.effective_date(r, _rtoday) or _rdate.max))
+    due_now = [r for r in rsorted if reminders.due(r, _rtoday)]
+    if due_now:
+        st.info("⏰ **Due now:** " + " · ".join(
+            f"{r['text']} ({advice.pretty_date(reminders.effective_date(r, _rtoday).isoformat())})"
+            for r in due_now))
+    if rsorted:
+        for r in rsorted:
+            eff = reminders.effective_date(r, _rtoday)
+            when = advice.pretty_date(eff.isoformat()) if eff else "?"
+            tag = " · every year" if r.get("yearly") else ""
+            flag = " ⏰" if reminders.due(r, _rtoday) else ""
+            done = " · ✅ done" if r.get("done") and not r.get("yearly") else ""
+            st.markdown(f"- **{when}**{tag} — {r['text']}{flag}{done}")
+    else:
+        st.caption("No reminders yet. Add one below (e.g. the April PPF top-up).")
+
+    with st.expander("➕ Add / manage reminders"):
+        with st.form("add_reminder", clear_on_submit=True):
+            rc1, rc2, rc3 = st.columns([3, 1.3, 1])
+            r_text = rc1.text_input("What to remember", placeholder="Deposit ₹1.5L into PPF")
+            r_date = rc2.date_input("Date", format="DD/MM/YYYY")
+            r_yearly = rc3.checkbox("Every year")
+            if st.form_submit_button("Add reminder") and r_text.strip():
+                rlist.append(reminders.new(r_text.strip(), r_date.isoformat(), r_yearly))
+                if reminders.save(rlist):
+                    auto_sync()
+                    st.toast("Reminder added")
+                    st.rerun(scope="fragment")
+        if rsorted:
+            st.caption("Remove or mark a one-off done:")
+            for i, r in enumerate(rsorted):
+                q1, q2, q3 = st.columns([4, 1, 1])
+                eff = reminders.effective_date(r, _rtoday)
+                q1.write(f"{advice.pretty_date(eff.isoformat()) if eff else '?'} — {r['text']}")
+                if not r.get("yearly") and q2.button("Done", key=f"rem_done_{i}"):
+                    r["done"] = True
+                    reminders.save(rlist)
+                    auto_sync()
+                    st.rerun(scope="fragment")
+                if q3.button("Remove", key=f"rem_del_{i}"):
+                    rlist.remove(r)
+                    reminders.save(rlist)
+                    auto_sync()
+                    st.rerun(scope="fragment")
+
+
+QUICK_ASKS = [
+    "How is my whole portfolio doing?",
+    "What is my worst holding and should I still hold it?",
+    "Is my plan on track this month?",
+    "What should I do this week?",
+]
+
+
+def _render_actions(msg: dict, mi: int) -> None:
+    """Confirm buttons for anything the advisor offered to set up.
+
+    Nothing is written until one of these is tapped — the model only ever
+    proposes, `advisor_bot.apply_action` does the actual write in plain Python.
+    """
+    actions = msg.get("actions") or []
+    if not actions:
+        return
+    applied = msg.setdefault("applied", {})
+    st.caption("The advisor can set these up for you:")
+    for ai_, a in enumerate(actions):
+        key = str(ai_)
+        line = advisor_bot.describe_action(a)
+        if key in applied:
+            st.markdown(f"✅ {line}  \n_{applied[key]}_")
+            continue
+        c1, c2 = st.columns([4, 1])
+        c1.markdown(f"• {line}" + (f"  \n_{a.get('why')}_" if a.get("why") else ""))
+        if c2.button("Confirm", key=f"adv_act_{mi}_{ai_}", type="primary"):
+            ok, res = advisor_bot.apply_action(a)
+            if ok:
+                applied[key] = res
+                auto_sync()
+                st.toast("✅ " + res)
+            else:
+                st.toast("⚠️ " + res)
+            st.rerun(scope="fragment")
+
+
+def _ask_advisor(q: str, chat: list) -> None:
+    st.chat_message("user").markdown(q)
+    with st.chat_message("assistant"):
+        with st.spinner("reading your data, pulling live prices + news…"):
+            res = advisor_bot.answer(q, chat)
+    chat.append({"role": "user", "content": q})
+    if res.get("error"):
+        st.error(res["error"])
+    else:
+        chat.append({"role": "assistant", "content": res["text"],
+                     "actions": res.get("actions") or [],
+                     "sources": res.get("sources") or [],
+                     "engine": res.get("engine", "")})
+
+
+@st.fragment
+def advisor_fragment() -> None:
+    """The chat. A fragment so asking a question doesn't re-run every tab."""
+    st.caption("🔒 Your data stays in the app; only the question plus the relevant "
+               "figures are sent to your AI key for that one answer. It can set up "
+               "reminders, alerts and ledger calls, but only after you tap confirm.")
+    chat = st.session_state.setdefault("advisor_chat", [])
+    cc1, cc2 = st.columns([4, 1])
+    cc1.caption(f"{sum(1 for m in chat if m['role'] == 'user')} question(s) this session")
+    if cc2.button("Clear chat", key="adv_chat_clear") and chat:
+        st.session_state["advisor_chat"] = []
+        st.rerun(scope="fragment")
+
+    if not chat:
+        st.caption("Quick starts:")
+        qcols = st.columns(len(QUICK_ASKS))
+        for i, qa in enumerate(QUICK_ASKS):
+            if qcols[i].button(qa, key=f"adv_quick_{i}", width="stretch"):
+                _ask_advisor(qa, chat)
+                st.rerun(scope="fragment")
+
+    for mi, m in enumerate(chat):
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+            if m["role"] == "assistant":
+                if m.get("engine"):
+                    st.caption(m["engine"])
+                _render_actions(m, mi)
+                if m.get("sources"):
+                    with st.expander("sources it read"):
+                        for n in m["sources"]:
+                            st.markdown(f"- [{n['title']}]({n['url']}) · {n.get('date','')}")
+
+    if q := st.chat_input("Ask about a holding, the plan, or a what-if…"):
+        _ask_advisor(q, chat)
+        st.rerun(scope="fragment")
 
 
 watchlist = db.get_watchlist()
@@ -1085,89 +1323,17 @@ with tabs[4]:
 # ==================================================================== plan
 with tabs[5]:
     st.subheader("🗺️ Money plan")
-    plan = finance_plan.load_plan()
     if not os.environ.get("STOCKWATCH_STATE_KEY"):
         st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the plan — it is "
                    "stored encrypted so the public repo never sees it.")
-    elif plan is None:
-        st.info("No plan saved yet. Write it below and hit Save.")
     else:
-        st.caption(f"Last updated: {plan['updated']} · stored encrypted in the repo, "
-                   "readable only on devices holding your key")
-        st.markdown(plan["content"])
-
-        # Guarded so a transient deploy hiccup here can't white-screen every tab
-        # (Streamlit runs all tab bodies on each render).
-        try:
-            items = finance_plan.checklist_items(plan["content"])
-        except AttributeError:
-            items = []
-            st.caption("Checklist is loading a fresh deploy — reload in a moment.")
-        if items:
-            done_n = sum(1 for it in items if it["done"])
-            with st.expander(f"✅ Checklist — tap to mark done ({done_n}/{len(items)})",
-                             expanded=done_n < len(items)):
-                st.caption("Tapping a box updates the plan directly and syncs — no AI in "
-                           "between, so what you see is what's saved. Untick to reopen.")
-                for it in items:
-                    new = st.checkbox(it["text"], value=it["done"],
-                                      key=f"plan_chk_{it['line']}")
-                    if new != it["done"]:
-                        updated = finance_plan.set_check(plan["content"], it["line"], new)
-                        if finance_plan.save_plan(updated):
-                            auto_sync()
-                            st.toast(("Done: " if new else "Reopened: ") + it["text"][:40])
-                            st.rerun()
-
-    if os.environ.get("STOCKWATCH_STATE_KEY"):
-        from datetime import date as _rdate
+        plan_body_fragment()
         st.divider()
-        st.markdown("### 📅 Reminders")
-        rlist = reminders.load() or []
-        _rtoday = _rdate.today()
-        rsorted = sorted(rlist, key=lambda r: (reminders.effective_date(r, _rtoday) or _rdate.max))
-        due_now = [r for r in rsorted if reminders.due(r, _rtoday)]
-        if due_now:
-            st.info("⏰ **Due now:** " + " · ".join(
-                f"{r['text']} ({advice.pretty_date(reminders.effective_date(r, _rtoday).isoformat())})"
-                for r in due_now))
-        if rsorted:
-            for r in rsorted:
-                eff = reminders.effective_date(r, _rtoday)
-                when = advice.pretty_date(eff.isoformat()) if eff else "?"
-                tag = " · every year" if r.get("yearly") else ""
-                flag = " ⏰" if reminders.due(r, _rtoday) else ""
-                st.markdown(f"- **{when}**{tag} — {r['text']}{flag}")
-        else:
-            st.caption("No reminders yet. Add one below (e.g. the April PPF top-up).")
-        with st.expander("➕ Add / manage reminders"):
-            with st.form("add_reminder", clear_on_submit=True):
-                rc1, rc2, rc3 = st.columns([3, 1.3, 1])
-                r_text = rc1.text_input("What to remember",
-                                        placeholder="Deposit ₹1.5L into PPF")
-                r_date = rc2.date_input("Date", format="DD/MM/YYYY")
-                r_yearly = rc3.checkbox("Every year")
-                if st.form_submit_button("Add reminder") and r_text.strip():
-                    rlist.append(reminders.new(r_text.strip(), r_date.isoformat(), r_yearly))
-                    if reminders.save(rlist):
-                        auto_sync()
-                        st.toast("Reminder added")
-                        st.rerun()
-            if rsorted:
-                st.caption("Remove or mark a one-off done:")
-                for i, r in enumerate(rsorted):
-                    q1, q2, q3 = st.columns([4, 1, 1])
-                    eff = reminders.effective_date(r, _rtoday)
-                    q1.write(f"{advice.pretty_date(eff.isoformat()) if eff else '?'} — {r['text']}")
-                    if not r.get("yearly") and q2.button("Done", key=f"rem_done_{i}"):
-                        r["done"] = True
-                        reminders.save(rlist); auto_sync(); st.rerun()
-                    if q3.button("Remove", key=f"rem_del_{i}"):
-                        rlist.remove(r)
-                        reminders.save(rlist); auto_sync(); st.rerun()
+        reminders_fragment()
 
         with st.expander("✏️ Edit plan"):
-            draft = st.text_area("Markdown", value=(plan or {}).get("content", ""),
+            draft = st.text_area("Markdown",
+                                 value=(finance_plan.load_plan() or {}).get("content", ""),
                                  height=380, label_visibility="collapsed")
             if st.button("Save plan"):
                 if finance_plan.save_plan(draft):
@@ -1301,43 +1467,13 @@ with tabs[6]:
 # ================================================================= advisor
 with tabs[7]:
     st.subheader("💬 Ask your advisor")
-    st.caption("Answers using **your** portfolio, plan and advice ledger, mixed with "
-               "**live prices + fresh news** for whatever stock you ask about. Try "
-               "\"what should I do with PVRINOX?\" or \"is my plan on track?\"")
+    st.caption("Knows your **whole app** — every holding with live P&L, your funds, "
+               "plan, checklist, ledger, alerts and reminders — mixed with **live "
+               "prices + fresh news** for whatever stock you ask about. It can also "
+               "set up reminders, alerts and ledger calls for you, on your confirm.")
     if not ai_insights.available().get("gemini") and not ai_insights.available().get("openai"):
         st.warning("No AI key set — add STOCKWATCH_GEMINI_KEY in secrets to enable the chat.")
     elif not os.environ.get("STOCKWATCH_STATE_KEY"):
         st.warning("Set STOCKWATCH_STATE_KEY so the advisor can read your (encrypted) data.")
     else:
-        st.caption("🔒 Your data stays in the app; only the question plus the relevant "
-                   "figures are sent to your AI key for that one answer. Advice, not "
-                   "execution — trades are always your call.")
-        chat = st.session_state.setdefault("advisor_chat", [])
-        cc1, cc2 = st.columns([4, 1])
-        cc1.caption(f"{len(chat)//2} question(s) this session")
-        if cc2.button("Clear chat", key="adv_chat_clear") and chat:
-            st.session_state["advisor_chat"] = []
-            st.rerun()
-
-        for m in chat:
-            st.chat_message(m["role"]).markdown(m["content"])
-
-        if q := st.chat_input("Ask about a holding, the plan, or a what-if…"):
-            st.chat_message("user").markdown(q)
-            with st.chat_message("assistant"):
-                with st.spinner("reading your data, pulling live prices + news…"):
-                    res = advisor_bot.answer(q, chat)
-                if res.get("error"):
-                    st.error(res["error"])
-                    reply = None
-                else:
-                    st.markdown(res["text"])
-                    st.caption(res.get("engine", ""))
-                    if res.get("sources"):
-                        with st.expander("sources it read"):
-                            for n in res["sources"]:
-                                st.markdown(f"- [{n['title']}]({n['url']}) · {n.get('date','')}")
-                    reply = res["text"]
-            chat.append({"role": "user", "content": q})
-            if reply:
-                chat.append({"role": "assistant", "content": reply})
+        advisor_fragment()

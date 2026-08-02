@@ -424,3 +424,50 @@ def test_rule_key_stable_and_distinct():
     diff = {**base, "conditions": [{"metric": "price", "op": ">", "value": 2}]}
     assert repo_state.rule_key(base) == repo_state.rule_key(same)
     assert repo_state.rule_key(base) != repo_state.rule_key(diff)
+
+
+def test_advisor_action_parsing():
+    """The advisor's proposals must survive a round trip, and anything malformed
+    must be dropped rather than reaching a confirm button."""
+    from src import advisor_bot as ab
+
+    reply = ('You should look at this again in October.\n\n'
+             '```actions\n'
+             '[{"type": "add_reminder", "text": "Review ITC", "date": "2026-10-01",'
+             ' "yearly": false, "why": "the October check-in"}]\n'
+             '```')
+    prose, actions = ab.split_actions(reply)
+    assert "```" not in prose and prose.startswith("You should look")
+    assert len(actions) == 1 and actions[0]["type"] == "add_reminder"
+    assert "Review ITC" in ab.describe_action(actions[0])
+    assert "1st Oct, 26" in ab.describe_action(actions[0])
+
+    # plain answer, no block
+    assert ab.split_actions("just prose") == ("just prose", [])
+    # unknown type and broken JSON are both dropped
+    assert ab.split_actions('x\n```actions\n[{"type":"rm -rf"}]\n```')[1] == []
+    assert ab.split_actions("x\n```actions\n[not json\n```")[1] == []
+
+
+def test_advisor_apply_action_validates(tmp_path, monkeypatch):
+    """apply_action re-checks every field itself — the model is never trusted."""
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k")
+    monkeypatch.setattr(repo_state, "STATE_DIR", tmp_path)
+    from src import advisor_bot as ab, reminders as rem
+    monkeypatch.setattr(rem, "REMINDERS_JSON", tmp_path / "reminders.json")
+
+    ok, msg = ab.apply_action({"type": "add_reminder", "text": "PPF top-up",
+                               "date": "2027-04-01", "yearly": True})
+    assert ok, msg
+    rows = rem.load()
+    assert len(rows) == 1 and rows[0]["yearly"] is True
+
+    # bad date / missing text / unknown type all refuse, and write nothing
+    assert ab.apply_action({"type": "add_reminder", "text": "x", "date": "soon"})[0] is False
+    assert ab.apply_action({"type": "add_reminder", "text": "", "date": "2027-04-01"})[0] is False
+    assert ab.apply_action({"type": "drop_table"})[0] is False
+    assert ab.apply_action({"type": "add_alert", "symbol": "TCS", "metric": "vibes",
+                            "op": "<", "value": 1})[0] is False
+    assert ab.apply_action({"type": "add_alert", "symbol": "TCS", "metric": "price",
+                            "op": "<", "value": "abc"})[0] is False
+    assert len(rem.load()) == 1                      # still just the one good write

@@ -12,6 +12,7 @@ catalysts and risks — and to say so when the news is thin.
 """
 from __future__ import annotations
 
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote
@@ -82,15 +83,35 @@ def _prompt(symbol: str, context: str, news: list[dict]) -> str:
             f"Recent headlines:\n{lines}\n\nWrite the grounded summary now.")
 
 
-def _gemini(prompt: str) -> str:
+# Gemini's free tier returns 503 ("high demand") and 429 (rate limit) fairly
+# often, and both clear within seconds. Retrying quietly beats showing the user
+# a raw HTTP error for something that isn't their problem.
+_RETRY_CODES = {429, 500, 502, 503, 504}
+
+
+def _gemini(prompt: str, attempts: int = 3) -> str:
     ai = CONFIG["ai"]
     model = ai.get("model_gemini", "gemini-flash-latest")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={ai['gemini_api_key']}"
-    r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=45)
-    if not r.ok:
-        raise RuntimeError(f"Gemini {r.status_code}: {r.text[:160]}")
-    cand = (r.json().get("candidates") or [{}])[0]
-    return "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", [])).strip()
+    last = ""
+    for i in range(attempts):
+        try:
+            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]},
+                              timeout=60)
+        except requests.RequestException as e:
+            last = str(e)[:160]
+            r = None
+        if r is not None and r.ok:
+            cand = (r.json().get("candidates") or [{}])[0]
+            return "".join(p.get("text", "")
+                           for p in cand.get("content", {}).get("parts", [])).strip()
+        if r is not None:
+            last = f"Gemini {r.status_code}: {r.text[:160]}"
+            if r.status_code not in _RETRY_CODES:
+                break                                  # bad key/prompt — retrying won't help
+        if i < attempts - 1:
+            time.sleep(1.5 * (i + 1))
+    raise RuntimeError(last or "Gemini call failed")
 
 
 def _openai(prompt: str) -> str:
