@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import advice, ai_insights, analysis, finance_plan, mf, watcher
+from . import advice, ai_insights, analysis, db, finance_plan, mf, watcher
 from .repo_state import _read_maybe_enc, WATCHLIST_JSON
 
 BRIEF = (
@@ -85,9 +85,35 @@ def _holdings_universe() -> list[str]:
     return sorted(s for s in syms if s)
 
 
+def _stock_holdings() -> str:
+    """Equity lots from the Portfolio tab — share counts, cost, invested. Stored
+    figures only (instant); live current value comes from the per-question
+    LIVE FIGURES block, so this stays fast even with 20+ holdings."""
+    rows = db.get_holdings()
+    if not rows:
+        return ""
+    agg: dict[str, dict] = {}
+    for h in rows:
+        a = agg.setdefault(h["symbol"], {"qty": 0.0, "cost": 0.0, "dates": []})
+        a["qty"] += h["qty"]
+        a["cost"] += h["qty"] * h["buy_price"]
+        if h.get("buy_date"):
+            a["dates"].append(h["buy_date"])
+    lines = []
+    for sym, a in sorted(agg.items()):
+        avg = a["cost"] / a["qty"] if a["qty"] else 0
+        held = f", since {min(a['dates'])}" if a["dates"] else ""
+        lines.append(f"  - {sym}: {a['qty']:g} sh, avg Rs {avg:,.2f}, "
+                     f"invested Rs {a['cost']:,.0f}{held}")
+    return "STOCK HOLDINGS (your equity lots):\n" + "\n".join(lines)
+
+
 def _money_context() -> str:
     """Compact text pack of everything we hold + the plan + open advice calls."""
     parts = []
+    stocks = _stock_holdings()
+    if stocks:
+        parts.append(stocks)
     mf_rows = mf.load_mf() or []
     if mf_rows:
         lines = []
