@@ -319,21 +319,37 @@ def reminders_fragment() -> None:
         for r in rsorted:
             eff = reminders.effective_date(r, _rtoday)
             when = advice.pretty_date(eff.isoformat()) if eff else "?"
-            tag = " · every year" if r.get("yearly") else ""
+            if r.get("monthly"):
+                tag = " · every month"
+                if r.get("until"):
+                    tag += f" till {advice.pretty_date(str(r['until']))}"
+                if eff is None:
+                    when = "finished"
+            elif r.get("yearly"):
+                tag = " · every year"
+            else:
+                tag = ""
             flag = " ⏰" if reminders.due(r, _rtoday) else ""
-            done = " · ✅ done" if r.get("done") and not r.get("yearly") else ""
+            done = " · ✅ done" if r.get("done") and not reminders.repeats(r) else ""
             st.markdown(f"- **{when}**{tag} — {r['text']}{flag}{done}")
     else:
         st.caption("No reminders yet. Add one below (e.g. the April PPF top-up).")
 
     with st.expander("➕ Add / manage reminders"):
         with st.form("add_reminder", clear_on_submit=True):
-            rc1, rc2, rc3 = st.columns([3, 1.3, 1])
+            rc1, rc2 = st.columns([3, 1.3])
             r_text = rc1.text_input("What to remember", placeholder="Deposit ₹1.5L into PPF")
             r_date = rc2.date_input("Date", format="DD/MM/YYYY")
-            r_yearly = rc3.checkbox("Every year")
+            rc3, rc4 = st.columns([1.3, 1.3])
+            r_repeat = rc3.selectbox("Repeats", ["never", "every month", "every year"])
+            r_until = rc4.date_input("Ends (optional, for monthly)", value=None,
+                                     format="DD/MM/YYYY")
             if st.form_submit_button("Add reminder") and r_text.strip():
-                rlist.append(reminders.new(r_text.strip(), r_date.isoformat(), r_yearly))
+                rlist.append(reminders.new(
+                    r_text.strip(), r_date.isoformat(),
+                    yearly=(r_repeat == "every year"),
+                    monthly=(r_repeat == "every month"),
+                    until=r_until.isoformat() if r_until else None))
                 if reminders.save(rlist):
                     auto_sync()
                     st.toast("Reminder added")
@@ -344,7 +360,7 @@ def reminders_fragment() -> None:
                 q1, q2, q3 = st.columns([4, 1, 1])
                 eff = reminders.effective_date(r, _rtoday)
                 q1.write(f"{advice.pretty_date(eff.isoformat()) if eff else '?'} — {r['text']}")
-                if not r.get("yearly") and q2.button("Done", key=f"rem_done_{i}"):
+                if not reminders.repeats(r) and q2.button("Done", key=f"rem_done_{i}"):
                     r["done"] = True
                     reminders.save(rlist)
                     auto_sync()

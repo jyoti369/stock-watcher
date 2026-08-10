@@ -80,7 +80,8 @@ ACTION_BRIEF = (
     '"date": "2026-10-01", "yearly": false, "why": "the October review you asked for"}]\n'
     "```\n"
     "Allowed types and fields:\n"
-    '- add_reminder: text, date (YYYY-MM-DD), yearly (true/false)\n'
+    '- add_reminder: text, date (YYYY-MM-DD), yearly (true/false), monthly '
+    '(true/false), until (YYYY-MM-DD, optional stop date for monthly)\n'
     '- add_advice: symbol, stance (KEEP/TRIM/SELL/HOLD-RULE/WATCH), thesis, '
     'catalyst, catalyst_date (YYYY-MM-DD), sell_above (number), stop_below '
     '(number), review_by (YYYY-MM-DD)\n'
@@ -246,7 +247,8 @@ def _reminders_block(today: date) -> str:
     for r in sorted(rows, key=lambda r: (reminders.effective_date(r, today) or date.max)):
         eff = reminders.effective_date(r, today)
         when = advice.pretty_date(eff.isoformat()) if eff else "?"
-        tag = " (every year)" if r.get("yearly") else ""
+        tag = " (every year)" if r.get("yearly") else \
+            " (every month)" if r.get("monthly") else ""
         flag = " <- DUE NOW" if reminders.due(r, today) else ""
         lines.append(f"  - {when}{tag}: {r['text']}{flag}")
     return "REMINDERS SET:\n" + "\n".join(lines)
@@ -348,7 +350,10 @@ def describe_action(a: dict) -> str:
     t = a.get("type")
     if t == "add_reminder":
         when = advice.pretty_date(a.get("date"))
-        every = " every year" if a.get("yearly") else ""
+        every = " every year" if a.get("yearly") else \
+            " every month" if a.get("monthly") else ""
+        if a.get("monthly") and a.get("until"):
+            every += f" till {advice.pretty_date(a.get('until'))}"
         return f"Set reminder{every} for {when}: {a.get('text', '')}"
     if t == "add_advice":
         bits = [f"{a.get('symbol', '')} — {a.get('stance', '')}"]
@@ -382,8 +387,15 @@ def apply_action(a: dict) -> tuple[bool, str]:
                 date.fromisoformat(when)
             except ValueError:
                 return False, f"'{when}' is not a valid date"
+            until = str(a.get("until", ""))[:10] or None
+            if until:
+                try:
+                    date.fromisoformat(until)
+                except ValueError:
+                    until = None
             rows = reminders.load() or []
-            rows.append(reminders.new(text, when, bool(a.get("yearly"))))
+            rows.append(reminders.new(text, when, bool(a.get("yearly")),
+                                      bool(a.get("monthly")), until))
             return (True, "reminder saved") if reminders.save(rows) else \
                 (False, "no encryption key — nothing written")
 

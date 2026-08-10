@@ -298,6 +298,33 @@ def test_reminders_yearly_and_due(tmp_path, monkeypatch):
     assert reminders.load() == [ppf]
 
 
+def test_reminders_monthly_until():
+    from datetime import date
+    from src import reminders
+
+    stp = reminders.new("Redeem 80k arbitrage", "2026-09-18",
+                        monthly=True, until="2027-06-30")
+    # before the start date it points at the start date itself
+    assert reminders.effective_date(stp, date(2026, 8, 10)) == date(2026, 9, 18)
+    # after a run passes, it rolls to the 18th of the next month
+    assert reminders.effective_date(stp, date(2026, 9, 19)) == date(2026, 10, 18)
+    # December rolls over the year boundary
+    assert reminders.effective_date(stp, date(2026, 12, 20)) == date(2027, 1, 18)
+    # past `until` it stops firing entirely
+    assert reminders.effective_date(stp, date(2027, 6, 19)) is None
+    assert reminders.due(stp, date(2027, 7, 1)) is False
+    # due inside the 7-day window, quiet outside it
+    assert reminders.due(stp, date(2026, 9, 12)) is True
+    assert reminders.due(stp, date(2026, 9, 1)) is False
+    # done never silences a repeating reminder
+    stp["done"] = True
+    assert reminders.due(stp, date(2026, 9, 18)) is True
+
+    # a monthly anchored on the 31st clamps to shorter months
+    eom = reminders.new("month-end sweep", "2026-08-31", monthly=True)
+    assert reminders.effective_date(eom, date(2026, 9, 1)) == date(2026, 9, 30)
+
+
 def test_plan_checklist_toggle():
     from src import finance_plan
     content = ("## Pending\n- [ ] open PPF\n- [x] SIPs live\nsome prose\n"
