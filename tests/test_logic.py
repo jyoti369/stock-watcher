@@ -574,3 +574,66 @@ def test_shop_judge_and_parse():
     assert r["url"] == "https://www.amazon.in/Sparx-SM-171/dp/B07YP2F21T"
 
     assert shop.search_urls("white shoes")["Amazon"].endswith("k=white+shoes")
+
+
+def test_shop_scoring_and_new_stores():
+    from src import shop
+
+    # relevance: filler results score low, real matches high
+    assert shop.relevance("one piece anime printed t-shirt",
+                          "Men Solid Round Neck Cotton Blend T-Shirt") < 0.34
+    assert shop.relevance("one piece anime printed t-shirt",
+                          "Free Authority Men One Piece Anime Graphic Printed Tshirt") > 0.7
+    # plural/singular slack
+    assert shop.relevance("running shoe", "Nice Running Shoes for Men") == 1.0
+
+    # the composite score orders like a sane buyer would
+    proven = {"title": "ASIAN white running shoes", "price": 569,
+              "mrp": 1499, "rating": 4.0, "reviews": 112087}
+    thin = {"title": "ASIAN white running shoes", "price": 999,
+            "mrp": None, "rating": 4.6, "reviews": 12}
+    junk = {"title": "green casual sandal", "price": 300,
+            "mrp": 4999, "rating": 3.4, "reviews": 400}
+    q = "white running shoes"
+    s1, s2, s3 = (shop.score(r, q, 1000) for r in (proven, thin, junk))
+    assert s1 > s2 > s3
+    assert 0 <= s3 and s1 <= 100
+
+    # review-count shorthand used by the jina fallback
+    assert shop._count("8.8K") == 8800
+    assert shop._count("1.1L") == 110000
+    assert shop._count("(19)") == 19
+    assert shop._count("") is None
+
+    # myntra: products come embedded as window.__myx JSON
+    myx = ('<script>window.__myx = {"searchData":{"results":{"products":['
+           '{"productId":1,"product":"Puma Smashic Sneakers","productName":'
+           '"Puma Smashic Sneakers","brand":"Puma","price":950,"mrp":4499,'
+           '"rating":4.33209,"ratingCount":64015,'
+           '"landingPageUrl":"casual-shoes/puma/1/buy"}]}}};</script>')
+    rows = shop._parse_myntra(myx)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["title"] == "Puma Smashic Sneakers"      # brand not doubled
+    assert r["price"] == 950 and r["rating"] == 4.3 and r["reviews"] == 64015
+    assert r["url"].endswith("casual-shoes/puma/1/buy")
+    assert shop._parse_myntra("<html>no payload</html>") == []
+    assert shop._parse_myntra(myx, max_price=800) == []
+
+    # amazon jina-markdown fallback parser
+    md = ("## SPARX\n"
+          "## [Sports Shoe SM-171 for Men](https://www.amazon.in/Sparx-White/dp/B07YP2F21T/ref=sr_1_2?x=1)\n"
+          "4.1[_4.1 out of 5 stars_](javascript:void(0))[(8.8K)](https://www.amazon.in/x)\n"
+          "300+ bought in past month\n"
+          "Price, product page[₹988₹988 M.R.P: ₹1,499 M.R.P: ₹1,499₹1,499](https://www.amazon.in/x)\n")
+    rows = shop._parse_amazon_md(md)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["title"] == "SPARX Sports Shoe SM-171 for Men"
+    assert r["price"] == 988 and r["mrp"] == 1499
+    assert r["rating"] == 4.1 and r["reviews"] == 8800
+    assert r["url"] == "https://www.amazon.in/Sparx-White/dp/B07YP2F21T"
+    assert shop._parse_amazon_md("", None) == []
+
+    assert "buyhatke.com/search/" in shop.history_url("ASIAN Wonder 13")
+    assert "myntra.com" in shop.search_urls("white shoes")["Myntra"]

@@ -1539,15 +1539,14 @@ with tabs[8]:
 
 # ================================================================ buy advisor
 with tabs[9]:
-    st.subheader("🛒 Buy advisor — best price + quality, judged")
-    st.caption("Type what you want to buy; it searches **Amazon + Flipkart** "
-               "live and judges every listing by the house rules: trust "
-               "**rating × review depth**, never the discount badge (4★+ "
-               "across 1,000+ reviews = mass-proven) · **3.8★ floor** — at "
-               "budget prices the average unit has to be good · **fake-MRP "
-               "check** — an MRP 3× the selling price is an anchor trick, "
-               "judge on what you actually pay · under 100 reviews = "
-               "unproven, whatever the stars say.")
+    st.subheader("🛒 Buy advisor — one score, one pick")
+    st.caption("Searches **Amazon + Flipkart + Myntra** live, drops listings "
+               "that don't match what you typed, and boils each one down to "
+               "a **0–100 score**: 45% quality (rating, shrunk so a handful "
+               "of 5★ reviews can't beat thousands of 4★ ones) · 30% match "
+               "with your words · 15% price inside your budget · 10% review "
+               "depth · minus a nick for fake-MRP anchor tricks. "
+               "Top of the list = buy that one.")
 
     with st.form("shop_form"):
         c1, c2 = st.columns([3, 1])
@@ -1568,36 +1567,57 @@ with tabs[9]:
         def _shop_cached(query: str, max_price, bucket: str):
             return shop.advise(query, max_price)
 
-        with st.spinner(f"Searching Amazon + Flipkart for “{q}”…"):
+        with st.spinner(f"Searching the stores for “{q}” (up to ~1 min)…"):
             found = _shop_cached(q, cap, datetime.now().strftime("%Y%m%d%H")
                                  + str(datetime.now().minute // 30))
         srcs = {r["source"] for r in found}
+        missing = [s for s in ("Amazon", "Flipkart", "Myntra")
+                   if s not in srcs]
         if not found:
-            st.warning("Both stores blocked this request (they throttle "
-                       "non-browser traffic, and cloud servers are always "
-                       "blocked). Search by hand instead:")
-        elif "Amazon" not in srcs:
-            st.info("Amazon didn't answer (usually the cloud-server block or "
-                    "a throttle) — results below are Flipkart-only. Amazon "
-                    "hand-search link at the bottom.")
-        elif "Flipkart" not in srcs:
-            st.info("Flipkart didn't answer (throttle) — results below are "
-                    "Amazon-only. Flipkart hand-search link at the bottom.")
+            st.warning("No store answered (cloud servers get blocked; even "
+                       "from home they throttle rapid retries). Hand-search "
+                       "links below — or ask Claude to pull them.")
+        elif missing:
+            st.caption(f"⚠️ {' + '.join(missing)} didn't answer this time "
+                       "(block/throttle) — ranking uses the stores that did. "
+                       "Hand-search links at the bottom.")
 
         badge = {"PICK-ZONE": "🟢", "OK": "🟡", "UNRATED": "⚪",
                  "RISKY": "🟠", "AVOID": "🔴"}
-        for r in found[:15]:
-            stars = f"{r['rating']:g}★" if r.get("rating") else "?★"
-            rev = f"{int(r['reviews']):,} reviews" if r.get("reviews") else \
-                "review count unknown"
-            st.markdown(
-                f"{badge.get(r['verdict'], '⚪')} **₹{r['price']:g}** · "
-                f"{stars} · {rev} · {r['source']} — "
-                f"[{r['title'][:70]}]({r['url']})")
-            st.caption(f"{r['verdict']}: {r['why']}")
         if found:
-            st.caption("Prices move all day during sales — the link is live, "
-                       "the row is a snapshot. Re-search before paying.")
+            top = found[0]
+            stars = f"{top['rating']:g}★" if top.get("rating") else "?★"
+            rev = f"{int(top['reviews']):,} reviews" if top.get("reviews") \
+                else "reviews unknown"
+            st.success(f"🏆 **Best bet — score {top['score']}/100** · "
+                       f"₹{top['price']:g} · {stars} · {rev} · {top['source']}\n\n"
+                       f"**[{top['title'][:90]}]({top['url']})**\n\n"
+                       f"{top['why']} · [📉 price trend]({top['history']})")
+
+        for r in found[1:8]:
+            left, right = st.columns([11, 2])
+            stars = f"{r['rating']:g}★" if r.get("rating") else "?★"
+            rev = f"{int(r['reviews']):,}" if r.get("reviews") else "?"
+            left.markdown(
+                f"{badge.get(r['verdict'], '⚪')} **₹{r['price']:g}** · "
+                f"{stars} ({rev}) · {r['source']} — "
+                f"[{r['title'][:65]}]({r['url']}) · "
+                f"[📉]({r['history']})")
+            left.caption(f"{r['verdict']}: {r['why']}")
+            right.markdown(f"<div style='text-align:center;font-size:1.5em;"
+                           f"font-weight:700'>{r['score']}</div>"
+                           "<div style='text-align:center;font-size:0.7em;"
+                           "opacity:0.6'>/100</div>", unsafe_allow_html=True)
+        if len(found) > 8:
+            with st.expander(f"{len(found) - 8} more (lower scores)"):
+                for r in found[8:30]:
+                    stars = f"{r['rating']:g}★" if r.get("rating") else "?★"
+                    st.markdown(f"`{r['score']:>3}` ₹{r['price']:g} · {stars} "
+                                f"· {r['source']} — [{r['title'][:60]}]"
+                                f"({r['url']})")
+        if found:
+            st.caption("📉 = price history/trend on buyhatke. Prices move all "
+                       "day during sales — re-search before paying.")
         links = shop.search_urls(q)
         st.markdown("Hand-search: " + " · ".join(
             f"[{name}]({url})" for name, url in links.items()))

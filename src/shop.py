@@ -1,4 +1,5 @@
-"""Buy advisor — search Amazon.in + Flipkart and judge results by house rules.
+"""Buy advisor — search Amazon.in / Flipkart / Myntra, judge by house rules,
+and boil everything down to ONE score per listing so a decision takes seconds.
 
 The rules (learned shopping the hard way, Aug 2026):
 
@@ -10,20 +11,40 @@ The rules (learned shopping the hard way, Aug 2026):
   3. Rating floor 3.8*. Below that, no price is cheap enough — budget items
      live or die on the average unit being fine, not the lucky one.
   4. Under 100 reviews = unproven, whatever the stars say.
-  5. Prefer listings whose brand you can name; no-name marketplace brands are
-     where the fake MRPs and one-month soles cluster.
+  5. Results must actually MATCH the query — a "solid" tee returned for an
+     "anime printed" search is filler, drop it before it wastes attention.
 
-Sourcing note: Amazon blocks requests coming from datacenter IPs (Streamlit
-Cloud, GitHub Actions) with a 503 — the scrape only works from a residential
-connection (running the app locally / a laptop session). Flipkart is usually
-reachable from anywhere. Everything degrades to "open this search yourself"
-links rather than crashing the tab.
+The score (0-100) folds those into one number:
+     45% quality  — the rating, Bayesian-shrunk toward 3.7* so a handful of
+                    5* reviews can't beat thousands of 4.1* ones
+     30% relevance — how much of the query the title actually covers
+     15% value     — where the price sits inside the budget
+     10% depth     — review count on a log scale (1L >> 1k >> 10)
+     minus a nick for fake-MRP anchors.
+
+Sourcing mechanics (each store needed its own trick):
+  - python requests' TLS handshake is fingerprinted and rejected by all of
+    them — every fetch shells out to curl instead.
+  - Amazon 503s datacenter IPs (Streamlit Cloud, Actions) and soft-throttles
+    even home IPs with a ~2KB robot page served as HTTP 200 (tiny body =
+    retry). When direct fails, fall back to the r.jina.ai reader proxy,
+    which fetches from its own infra and returns markdown — that path works
+    from the cloud too.
+  - Flipkart 403s Safari/Chrome UA strings but admits Firefox; its search
+    cards don't carry ratings (JS-loaded), so the top few relevant hits get
+    enriched from their product pages' JSON-LD, which is server-rendered.
+  - Myntra embeds the full search payload as JSON in window.__myx — ratings
+    included, no enrichment needed.
+Everything degrades to "open this search yourself" links rather than crash.
 """
 from __future__ import annotations
 
+import json
+import math
 import re
 import subprocess
-from urllib.parse import quote_plus
+import time
+from urllib.parse import quote, quote_plus
 
 _UA = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -32,16 +53,47 @@ _UA = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-IN,en;q=0.9",
 }
+_FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0"
+
+RULES = {"rating_floor": 3.8, "pick_rating": 4.0, "pick_reviews": 1000,
+         "min_reviews": 100, "fake_mrp_ratio": 3.0}
+
+_STOP = {"for", "a", "an", "the", "and", "or", "with", "of", "in", "under",
+         "rs", "men", "mens", "women", "womens", "man", "woman", "buy",
+         "best", "good", "new"}
+
+
+def search_urls(query: str) -> dict:
+    """Hand-openable search pages, for when scraping is blocked."""
+    q = quote_plus(query)
+    return {
+        "Amazon": f"https://www.amazon.in/s?k={q}",
+        "Flipkart": f"https://www.flipkart.com/search?q={q}",
+        "Myntra": "https://www.myntra.com/" + quote(query.replace(" ", "-")),
+    }
+
+
+def history_url(title: str) -> str:
+    """Price-trend lookup on buyhatke for one listing."""
+    return "https://buyhatke.com/search/" + quote(title[:60])
+
+
+def _num(text: str) -> float | None:
+    m = re.search(r"\d[\d,]*\.?\d*", str(text))
+    return float(m.group().replace(",", "")) if m else None
+
+
+def _count(text: str) -> float | None:
+    """Review counts like '8.8K', '1.1L', '112,087'."""
+    m = re.search(r"([\d,.]+)\s*([KLM]?)", str(text).strip(), re.I)
+    if not m or not m.group(1).strip(",."):
+        return None
+    n = float(m.group(1).replace(",", ""))
+    return round(n * {"K": 1e3, "L": 1e5, "M": 1e6}.get(m.group(2).upper(), 1))
 
 
 def _get(url: str, ua: str | None = None) -> str:
-    """Fetch through curl, not requests — both stores fingerprint the TLS
-    handshake of python's ssl stack and reject it (Amazon 503, Flipkart 403)
-    even from a residential IP, while curl's handshake passes as a browser.
-    Flipkart additionally 403s Safari/Chrome UA strings but lets Firefox in.
-    Amazon also soft-throttles: an over-eager client gets a ~2KB robot-check
-    page served as a 200 — a tiny body is a failure, retried after a pause."""
-    import time
+    """curl fetch; tiny 200s (Amazon's disguised robot page) count as misses."""
     headers = dict(_UA, **({"User-Agent": ua} if ua else {}))
     cmd = ["curl", "-s", "--compressed", "--max-time", "25",
            "-w", "\n%{http_code}"]
@@ -60,28 +112,48 @@ def _get(url: str, ua: str | None = None) -> str:
             return body
     return ""
 
-RULES = {"rating_floor": 3.8, "pick_rating": 4.0, "pick_reviews": 1000,
-         "min_reviews": 100, "fake_mrp_ratio": 3.0}
+
+# ---------------------------------------------------------------- relevance
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower())
+            if t not in _STOP and len(t) > 1]
 
 
-def search_urls(query: str) -> dict:
-    """Hand-openable search pages, for when scraping is blocked."""
-    q = quote_plus(query)
-    return {
-        "Amazon": f"https://www.amazon.in/s?k={q}",
-        "Flipkart": f"https://www.flipkart.com/search?q={q}",
-    }
+def relevance(query: str, title: str) -> float:
+    """Share of the query's meaningful words the title actually covers."""
+    q = _tokens(query)
+    if not q:
+        return 1.0
+    hay = title.lower()
+    hits = sum(1 for t in q if t in hay
+               or (t.endswith("s") and t[:-1] in hay)
+               or (t + "s") in hay)
+    return hits / len(q)
 
 
-def _num(text: str) -> float | None:
-    m = re.search(r"\d[\d,]*\.?\d*", str(text))
-    return float(m.group().replace(",", "")) if m else None
-
+# ------------------------------------------------------------------- stores
 
 def search_amazon(query: str, max_price: float | None = None) -> list[dict]:
-    """[{title, price, mrp, rating, reviews, url, source}] — [] when blocked."""
-    return _parse_amazon(_get(f"https://www.amazon.in/s?k={quote_plus(query)}"),
-                         max_price)
+    """Direct scrape first; r.jina.ai reader as the from-anywhere fallback."""
+    rows = _parse_amazon(
+        _get(f"https://www.amazon.in/s?k={quote_plus(query)}"), max_price)
+    if rows:
+        return rows
+    md = _get_jina(f"https://www.amazon.in/s?k={quote_plus(query)}")
+    return _parse_amazon_md(md, max_price)
+
+
+def _get_jina(url: str) -> str:
+    try:
+        raw = subprocess.run(
+            ["curl", "-s", "--max-time", "60", "-w", "\n%{http_code}",
+             "https://r.jina.ai/" + url],
+            capture_output=True, text=True, timeout=70).stdout
+    except (subprocess.SubprocessError, OSError):
+        return ""
+    body, _, code = raw.rpartition("\n")
+    return body if code.strip() == "200" and len(body) > 5000 else ""
 
 
 def _parse_amazon(html: str, max_price: float | None = None) -> list[dict]:
@@ -131,12 +203,53 @@ def _parse_amazon(html: str, max_price: float | None = None) -> list[dict]:
     return out
 
 
+def _parse_amazon_md(md: str, max_price: float | None = None) -> list[dict]:
+    """Parse the r.jina.ai markdown rendering of an Amazon search page.
+    Per product it emits:  ## BRAND / ## [Title](...dp/ASIN...) /
+    4.1[_4.1 out of 5 stars_](...)[(8.8K)](...) / Price, product page[₹988..."""
+    if not md:
+        return []
+    out, seen = [], set()
+    brand, cur = "", None
+    for line in md.splitlines():
+        m = re.match(r"## \[(.+?)\]\((https://www\.amazon\.in/[^)]*?/dp/"
+                     r"[A-Z0-9]{10})", line)
+        if m:
+            title = m.group(1).strip()
+            if brand and not title.lower().startswith(brand.lower()):
+                title = f"{brand} {title}"
+            cur = {"title": title, "url": m.group(2), "price": None,
+                   "mrp": None, "rating": None, "reviews": None,
+                   "source": "Amazon"}
+            continue
+        m = re.match(r"## (?!\[)(.{2,40})$", line)
+        if m:
+            brand = m.group(1).strip()
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"(\d\.\d)\[_\d\.\d out of 5 stars", line)
+        if m:
+            cur["rating"] = float(m.group(1))
+            mv = re.search(r"\[\(([\d.,]+[KLM]?)\)\]", line)
+            cur["reviews"] = _count(mv.group(1)) if mv else None
+            continue
+        if line.startswith("Price, product page"):
+            cur["price"] = _num(re.search(r"₹\s?([\d,]+)", line).group(1)) \
+                if re.search(r"₹\s?[\d,]+", line) else None
+            mv = re.search(r"M\.R\.P:\s*₹\s?([\d,]+)", line)
+            cur["mrp"] = _num(mv.group(1)) if mv else None
+            if cur["price"] and cur["title"] not in seen \
+                    and not (max_price and cur["price"] > max_price):
+                seen.add(cur["title"])
+                out.append(cur)
+            cur = None
+    return out
+
+
 def search_flipkart(query: str, max_price: float | None = None) -> list[dict]:
-    """Best-effort card scrape of Flipkart search; their markup is obfuscated
-    so this leans on structure (product links + rupee amounts), not classes."""
     html = _get(f"https://www.flipkart.com/search?q={quote_plus(query)}",
-                ua="Mozilla/5.0 (X11; Linux x86_64; rv:109.0) "
-                   "Gecko/20100101 Firefox/121.0")
+                ua=_FIREFOX)
     return _parse_flipkart(html, max_price)
 
 
@@ -176,12 +289,70 @@ def _parse_flipkart(html: str, max_price: float | None = None) -> list[dict]:
             else None
         reviews = _num(m.group(2)) if m and m.group(2) else None
         seen.add(href)
-        out.append({"title": title[:90], "price": price, "mrp": mrp,
+        out.append({"title": title, "price": price, "mrp": mrp,
                     "rating": rating, "reviews": reviews,
                     "url": "https://www.flipkart.com" + href,
                     "source": "Flipkart"})
     return out
 
+
+def enrich_flipkart(rows: list[dict], limit: int = 6) -> None:
+    """Fill missing rating/reviews from the product pages' JSON-LD (their
+    search cards load ratings via JS). Mutates rows in place, top-N only."""
+    done = 0
+    for r in rows:
+        if done >= limit:
+            break
+        if r["source"] != "Flipkart" or r.get("rating") is not None:
+            continue
+        html = _get(r["url"], ua=_FIREFOX)
+        done += 1
+        m = re.search(r'"aggregateRating":\{"ratingValue":([\d.]+),'
+                      r'"reviewCount":(\d+),"ratingCount":(\d+)', html)
+        if m:
+            r["rating"] = round(float(m.group(1)), 1)
+            r["reviews"] = float(m.group(3))
+        time.sleep(1)          # stay under their throttle
+
+
+def search_myntra(query: str, max_price: float | None = None) -> list[dict]:
+    html = _get("https://www.myntra.com/" + quote(query.replace(" ", "-")),
+                ua=_FIREFOX)
+    return _parse_myntra(html, max_price)
+
+
+def _parse_myntra(html: str, max_price: float | None = None) -> list[dict]:
+    m = re.search(r"window\.__myx = (\{.*)", html or "")
+    if not m:
+        return []
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(m.group(1))
+    except ValueError:
+        return []
+    prods = (payload.get("searchData", {}).get("results", {})
+             .get("products", []))
+    out = []
+    for p in prods:
+        name = (p.get("productName") or p.get("product") or "").strip()
+        brand = (p.get("brand") or "").strip()
+        title = name if name.lower().startswith(brand.lower()) \
+            else f"{brand} {name}".strip()
+        price = p.get("price")
+        if not title or not price:
+            continue
+        if max_price and price > max_price:
+            continue
+        out.append({"title": title[:90], "price": float(price),
+                    "mrp": float(p["mrp"]) if p.get("mrp") else None,
+                    "rating": round(p["rating"], 1) if p.get("rating") else None,
+                    "reviews": float(p["ratingCount"]) if p.get("ratingCount")
+                    else None,
+                    "url": "https://www.myntra.com/" + p.get("landingPageUrl", ""),
+                    "source": "Myntra"})
+    return out
+
+
+# ----------------------------------------------------------------- judging
 
 def judge(row: dict) -> tuple[str, str]:
     """House-rules call on one listing: PICK-ZONE / OK / RISKY / AVOID / UNRATED."""
@@ -208,13 +379,38 @@ def judge(row: dict) -> tuple[str, str]:
         "top-shelf" + ("; " + notes[0] if notes else "")
 
 
+def score(row: dict, query: str, cap: float | None = None) -> int:
+    """One 0-100 number per listing; weights in the module docstring."""
+    n = row.get("reviews") or 0
+    bayes = ((row.get("rating") or 3.7) * n + 3.7 * 40) / (n + 40)
+    qual = max(0.0, min(1.0, (bayes - 3.4) / 1.1))
+    rel = relevance(query, row.get("title", ""))
+    if cap and row.get("price"):
+        value = max(0.0, min(1.0, 1 - 0.8 * row["price"] / cap))
+    else:
+        value = 0.5
+    depth = min(1.0, math.log10(n + 1) / 5)
+    pts = 45 * qual + 30 * rel + 15 * value + 10 * depth
+    if row.get("mrp") and row.get("price") \
+            and row["mrp"] >= RULES["fake_mrp_ratio"] * row["price"]:
+        pts -= 4
+    return int(round(max(0.0, min(100.0, pts))))
+
+
 def advise(query: str, max_price: float | None = None) -> list[dict]:
-    """Merged + judged results from both stores, best first."""
-    rows = search_amazon(query, max_price) + search_flipkart(query, max_price)
+    """All stores -> relevance-filter -> enrich -> score -> best first."""
+    rows = (search_amazon(query, max_price)
+            + search_flipkart(query, max_price)
+            + search_myntra(query, max_price))
+    matched = [r for r in rows if relevance(query, r["title"]) >= 0.34]
+    if len(matched) >= 3:
+        rows = matched
+    rows.sort(key=lambda r: (-relevance(query, r["title"]),
+                             -(r.get("rating") or 0)))
+    enrich_flipkart(rows)
     for r in rows:
         r["verdict"], r["why"] = judge(r)
-    order = {"PICK-ZONE": 0, "OK": 1, "UNRATED": 2, "RISKY": 3, "AVOID": 4}
-    rows.sort(key=lambda r: (order.get(r["verdict"], 9),
-                             -((r.get("rating") or 0) * 1000
-                               + min(r.get("reviews") or 0, 99000) / 100)))
+        r["score"] = score(r, query, max_price)
+        r["history"] = history_url(r["title"])
+    rows.sort(key=lambda r: -r["score"])
     return rows
