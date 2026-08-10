@@ -28,8 +28,8 @@ except Exception:
 
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
                  datasource, db, finance_plan, fundamentals, gh_sync, importer,
-                 mf, portfolio, projection, reminders, repo_state, scan_history,
-                 sectors, suggestions, verdict, watcher)
+                 ipo, mf, portfolio, projection, reminders, repo_state,
+                 scan_history, sectors, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -469,7 +469,7 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
                 "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice",
-                "💬 Advisor"])
+                "💬 Advisor", "🎯 IPO"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -1493,3 +1493,46 @@ with tabs[7]:
         st.warning("Set STOCKWATCH_STATE_KEY so the advisor can read your (encrypted) data.")
     else:
         advisor_fragment()
+
+# ================================================================ ipo screener
+with tabs[8]:
+    st.subheader("🎯 IPO screener — apply-for-the-listing-pop rules")
+    st.caption("House rules, tuned for the flip strategy (apply → sell in the first "
+               "30 min of listing): **Mainboard** needs GMP ≥ 20% + total ≥ 15x + "
+               "QIB ≥ 5x · **SME** needs GMP ≥ 35% + total ≥ 25x + QIB ≥ 2x (min "
+               "application ~₹2L+, pure lottery). Always apply on the LAST day, "
+               "late morning, 1 lot per PAN. GMP is unofficial and easiest to fake "
+               "in SME issues — QIB numbers are the honesty check. Data: ipowatch.in, "
+               "also in the 12:05pm Telegram brief.")
+
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _ipo_screen_cached(bucket: str):
+        return ipo.screen()
+
+    if st.button("🔎 Check open IPOs now", type="primary"):
+        st.session_state["ipo_checked"] = True
+    if st.session_state.get("ipo_checked"):
+        with st.spinner("Scraping GMP + subscription tables…"):
+            # half-hour cache bucket so a tab hop doesn't re-scrape
+            ipo_rows = _ipo_screen_cached(datetime.now().strftime("%Y%m%d%H")
+                                          + str(datetime.now().minute // 30))
+        if not ipo_rows:
+            st.warning("Couldn't read any IPO data right now — the source page "
+                       "may be down or reshaped. Try again in a bit, or check "
+                       "ipowatch.in directly.")
+        else:
+            badge = {"APPLY-ZONE": "🟢", "WATCH": "🟡", "SKIP": "🔴", "NO DATA": "⚪"}
+            for r in ipo_rows:
+                pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"
+                tot = f"{r['total']:g}x" if r.get("total") is not None else "?"
+                qib = f"{r['qib']:g}x" if r.get("qib") is not None else "?"
+                st.markdown(
+                    f"{badge.get(r['verdict'], '⚪')} **{r['name']}** "
+                    f"({'SME' if r.get('sme') else 'Mainboard'}) — GMP {pct} · "
+                    f"total {tot} · QIB {qib}"
+                    + (f" · closes {r['close']}" if r.get("close") else ""))
+                st.caption(f"{r['verdict']}: {r['why']}")
+            st.caption("APPLY-ZONE = passes every bar **today** — still apply only "
+                       "on the last day. WATCH = GMP qualifies but the book is "
+                       "still filling (normal on day 1-2). Numbers move all day; "
+                       "recheck before paying.")

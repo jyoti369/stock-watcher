@@ -1,9 +1,12 @@
 name: daily-heartbeat
 
-# One digest a day after NSE close, so you always know the watcher is alive.
-# Cron is UTC: 10:15 UTC ≈ 15:45 IST (just after the 15:30 close), weekdays.
+# Two digests a day, weekdays. Cron is UTC:
+#   06:35 UTC ≈ 12:05 IST — midday action brief (reminders due + IPO screener),
+#     timed so the whole afternoon is left to apply before ~4:30pm cutoffs
+#   10:15 UTC ≈ 15:45 IST — market digest just after the 15:30 close
 on:
   schedule:
+    - cron: "35 6 * * 1-5"
     - cron: "15 10 * * 1-5"
   workflow_dispatch:
 
@@ -30,4 +33,9 @@ jobs:
           STOCKWATCH_STATE_KEY: ${{ secrets.STOCKWATCH_STATE_KEY }}
         run: |
           python -m src.repo_state import
-          python -m src.heartbeat
+          # before 09 UTC it's the midday IST slot -> morning brief
+          if [ "$(date -u +%H)" -lt 9 ]; then
+            python -m src.heartbeat morning
+          else
+            python -m src.heartbeat
+          fi

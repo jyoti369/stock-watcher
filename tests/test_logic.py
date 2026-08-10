@@ -498,3 +498,28 @@ def test_advisor_apply_action_validates(tmp_path, monkeypatch):
     assert ab.apply_action({"type": "add_alert", "symbol": "TCS", "metric": "price",
                             "op": "<", "value": "abc"})[0] is False
     assert len(rem.load()) == 1                      # still just the one good write
+
+
+def test_ipo_verdicts():
+    from src import ipo
+
+    # mainboard passing every bar
+    v, why = ipo.verdict({"sme": False, "gmp_pct": 28.0, "total": 40.0, "qib": 12.0})
+    assert v == "APPLY-ZONE" and "1 lot" in why
+    # good GMP but book still filling -> watch, not skip
+    v, _ = ipo.verdict({"sme": False, "gmp_pct": 30.0, "total": 0.4, "qib": 0.1})
+    assert v == "WATCH"
+    # retail froth without QIBs fails the honesty check
+    v, why = ipo.verdict({"sme": False, "gmp_pct": 25.0, "total": 30.0, "qib": 1.0})
+    assert v == "WATCH" and "QIB" in why
+    # SME bars are stricter: 25% GMP passes mainboard but not SME
+    assert ipo.verdict({"sme": True, "gmp_pct": 25.0, "total": 60.0, "qib": 4.0})[0] == "SKIP"
+    assert ipo.verdict({"sme": True, "gmp_pct": 39.0, "total": 55.0, "qib": 3.6})[0] == "APPLY-ZONE"
+    # nothing known
+    assert ipo.verdict({"sme": False, "gmp_pct": None, "total": None})[0] == "NO DATA"
+
+    # helpers used to join the two scraped tables
+    assert ipo._norm("LAPL Automotive IPO (SME)") == ipo._norm("LAPL Automotive Ltd")
+    assert ipo._num("₹2,25,600") == 225600.0
+    assert ipo._num("55.16x") == 55.16
+    assert ipo._num("--") is None

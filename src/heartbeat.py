@@ -1,15 +1,21 @@
-"""Daily heartbeat digest.
+"""Daily heartbeat digests.
 
-Once a day (after market close) this sends a short summary of your watchlist plus
-a health line. The point is trust: if the watcher ever breaks or the data source
-goes dark, you'll see it here — so silence from the alert watcher genuinely means
-"nothing triggered", not "it quietly died".
+Two sends a day. The after-close one (~3:45pm IST) is the market summary plus
+a health line — the point is trust: if the watcher ever breaks or the data
+source goes dark, you'll see it here, so silence from the alert watcher
+genuinely means "nothing triggered", not "it quietly died".
+
+The midday one (~12:05pm IST) is the actionable brief: reminders and advice
+calls due, plus the live IPO screener — timed so there's still the whole
+afternoon to actually apply/act before cutoffs. It stays silent on days with
+nothing due and no open IPOs.
 """
 from __future__ import annotations
 
+import sys
 from datetime import date, datetime, timezone
 
-from . import advice, alerts, analysis, db, reminders, watcher
+from . import advice, alerts, analysis, db, ipo, reminders, watcher
 
 _BADGE = {"OK": "🟢", "Mixed": "🟡", "Weak": "🔴", "Unknown": "⚪"}
 
@@ -97,5 +103,32 @@ def send_daily() -> list[str]:
     return channels
 
 
+def send_morning() -> list[str]:
+    """Midday action brief: due reminders/advice + IPO screener. Skips the
+    send entirely when there's nothing to act on — no noise, only signal."""
+    parts = []
+    rem = reminder_due_lines()
+    if rem:
+        parts.append("📅 Due:\n" + "\n".join(rem))
+    reviews = review_due_lines()
+    if reviews:
+        parts.append("⏰ Advice review due:\n" + "\n".join(reviews))
+    try:
+        ipos = ipo.digest_lines()
+    except Exception as e:                      # a broken scrape shouldn't kill the brief
+        ipos = [f"(IPO screener errored: {str(e)[:80]})"]
+    if ipos:
+        parts.append("🎯 IPO screener (house rules: MB 20%/15x/QIB5x · "
+                     "SME 35%/25x/QIB2x, last-day apply, 1 lot):\n"
+                     + "\n".join("• " + ln for ln in ipos))
+    if not parts:
+        print("[heartbeat] morning brief: nothing due, no open IPOs — staying quiet")
+        return []
+    channels = alerts.dispatch("🌅 Stock Watcher — midday brief", "\n\n".join(parts))
+    db.log_alert(None, "DIGEST", "-", "midday brief", channels)
+    print(f"[heartbeat] morning brief sent to {channels or 'no channel configured'}")
+    return channels
+
+
 if __name__ == "__main__":
-    send_daily()
+    send_morning() if "morning" in sys.argv[1:] else send_daily()
