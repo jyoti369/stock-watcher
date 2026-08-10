@@ -29,7 +29,7 @@ except Exception:
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
                  datasource, db, finance_plan, fundamentals, gh_sync, importer,
                  ipo, mf, portfolio, projection, reminders, repo_state,
-                 scan_history, sectors, suggestions, verdict, watcher)
+                 scan_history, sectors, shop, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -469,7 +469,7 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
                 "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice",
-                "💬 Advisor", "🎯 IPO"])
+                "💬 Advisor", "🎯 IPO", "🛒 Buy"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -1536,3 +1536,68 @@ with tabs[8]:
                        "on the last day. WATCH = GMP qualifies but the book is "
                        "still filling (normal on day 1-2). Numbers move all day; "
                        "recheck before paying.")
+
+# ================================================================ buy advisor
+with tabs[9]:
+    st.subheader("🛒 Buy advisor — best price + quality, judged")
+    st.caption("Type what you want to buy; it searches **Amazon + Flipkart** "
+               "live and judges every listing by the house rules: trust "
+               "**rating × review depth**, never the discount badge (4★+ "
+               "across 1,000+ reviews = mass-proven) · **3.8★ floor** — at "
+               "budget prices the average unit has to be good · **fake-MRP "
+               "check** — an MRP 3× the selling price is an anchor trick, "
+               "judge on what you actually pay · under 100 reviews = "
+               "unproven, whatever the stars say.")
+
+    with st.form("shop_form"):
+        c1, c2 = st.columns([3, 1])
+        shop_q = c1.text_input("What are you buying?",
+                               placeholder="e.g. white running shoes men")
+        shop_cap = c2.number_input("Budget ₹ (0 = any)", min_value=0,
+                                   value=1000, step=100)
+        shop_go = st.form_submit_button("🔎 Search & judge", type="primary")
+
+    if shop_go and shop_q.strip():
+        st.session_state["shop_q"] = shop_q.strip()
+        st.session_state["shop_cap"] = shop_cap or None
+
+    if st.session_state.get("shop_q"):
+        q, cap = st.session_state["shop_q"], st.session_state.get("shop_cap")
+
+        @st.cache_data(ttl=1800, show_spinner=False)
+        def _shop_cached(query: str, max_price, bucket: str):
+            return shop.advise(query, max_price)
+
+        with st.spinner(f"Searching Amazon + Flipkart for “{q}”…"):
+            found = _shop_cached(q, cap, datetime.now().strftime("%Y%m%d%H")
+                                 + str(datetime.now().minute // 30))
+        srcs = {r["source"] for r in found}
+        if not found:
+            st.warning("Both stores blocked this request (they throttle "
+                       "non-browser traffic, and cloud servers are always "
+                       "blocked). Search by hand instead:")
+        elif "Amazon" not in srcs:
+            st.info("Amazon didn't answer (usually the cloud-server block or "
+                    "a throttle) — results below are Flipkart-only. Amazon "
+                    "hand-search link at the bottom.")
+        elif "Flipkart" not in srcs:
+            st.info("Flipkart didn't answer (throttle) — results below are "
+                    "Amazon-only. Flipkart hand-search link at the bottom.")
+
+        badge = {"PICK-ZONE": "🟢", "OK": "🟡", "UNRATED": "⚪",
+                 "RISKY": "🟠", "AVOID": "🔴"}
+        for r in found[:15]:
+            stars = f"{r['rating']:g}★" if r.get("rating") else "?★"
+            rev = f"{int(r['reviews']):,} reviews" if r.get("reviews") else \
+                "review count unknown"
+            st.markdown(
+                f"{badge.get(r['verdict'], '⚪')} **₹{r['price']:g}** · "
+                f"{stars} · {rev} · {r['source']} — "
+                f"[{r['title'][:70]}]({r['url']})")
+            st.caption(f"{r['verdict']}: {r['why']}")
+        if found:
+            st.caption("Prices move all day during sales — the link is live, "
+                       "the row is a snapshot. Re-search before paying.")
+        links = shop.search_urls(q)
+        st.markdown("Hand-search: " + " · ".join(
+            f"[{name}]({url})" for name, url in links.items()))

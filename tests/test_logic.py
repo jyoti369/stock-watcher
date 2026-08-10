@@ -523,3 +523,54 @@ def test_ipo_verdicts():
     assert ipo._num("₹2,25,600") == 225600.0
     assert ipo._num("55.16x") == 55.16
     assert ipo._num("--") is None
+
+
+def test_shop_judge_and_parse():
+    from src import shop
+
+    # mass-proven listing clears the pick bar
+    v, why = shop.judge({"rating": 4.1, "reviews": 8885, "price": 909, "mrp": 1099})
+    assert v == "PICK-ZONE" and "8,885" in why
+    # fake-MRP anchor gets called out but doesn't sink a good product
+    v, why = shop.judge({"rating": 4.0, "reviews": 112087, "price": 569, "mrp": 3999})
+    assert v == "PICK-ZONE" and "inflated" in why
+    # below the rating floor no price is cheap enough
+    assert shop.judge({"rating": 3.5, "reviews": 864, "price": 400, "mrp": None})[0] == "AVOID"
+    # great stars on a thin review base stay risky
+    assert shop.judge({"rating": 4.3, "reviews": 66, "price": 999, "mrp": None})[0] == "RISKY"
+    # middle of the road
+    assert shop.judge({"rating": 3.8, "reviews": 7564, "price": 948, "mrp": None})[0] == "OK"
+    assert shop.judge({"rating": None, "reviews": None, "price": 500, "mrp": None})[0] == "UNRATED"
+
+    # flipkart parser works off structure, not their obfuscated classes
+    fk = """<div data-id="X1"><a href="/asian-shoe/p/itm123?pid=9">
+            <img alt=""/></a><a href="/asian-shoe/p/itm123">ASIAN WNDR-13 Pro</a>
+            <div>4.2 (1,401) ₹839 ₹1,499 44% off</div></div>
+            <div data-id="X2"><a href="/no-price/p/itm999"><img alt=""/></a></div>"""
+    rows = shop._parse_flipkart(fk)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["title"] == "ASIAN WNDR-13 Pro" and r["price"] == 839
+    assert r["mrp"] == 1499 and r["rating"] == 4.2 and r["reviews"] == 1401
+    assert r["url"].endswith("/asian-shoe/p/itm123")
+    # price cap filters
+    assert shop._parse_flipkart(fk, max_price=800) == []
+    assert shop._parse_flipkart("") == []
+
+    # amazon parser: title falls back to the image alt when h2 is brand-only
+    amz = """<div data-component-type="s-search-result">
+             <img alt="Sponsored Ad - SPARX Sports Shoe SM-171 for Men"/>
+             <h2><span>SPARX</span></h2>
+             <a class="a-link-normal" href="/Sparx-SM-171/dp/B07YP2F21T/ref=xyz"></a>
+             <span class="a-price-whole">909</span>
+             <span class="a-price a-text-price"><span class="a-offscreen">₹1,099</span></span>
+             <span class="a-icon-alt">4.1 out of 5 stars</span>
+             <span aria-label="8,885 ratings"></span></div>"""
+    rows = shop._parse_amazon(amz)
+    assert len(rows) == 1
+    r = rows[0]
+    assert "SM-171" in r["title"] and r["price"] == 909 and r["mrp"] == 1099
+    assert r["rating"] == 4.1 and r["reviews"] == 8885
+    assert r["url"] == "https://www.amazon.in/Sparx-SM-171/dp/B07YP2F21T"
+
+    assert shop.search_urls("white shoes")["Amazon"].endswith("k=white+shoes")
