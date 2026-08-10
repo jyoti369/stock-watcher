@@ -635,5 +635,49 @@ def test_shop_scoring_and_new_stores():
     assert r["url"] == "https://www.amazon.in/Sparx-White/dp/B07YP2F21T"
     assert shop._parse_amazon_md("", None) == []
 
-    assert "buyhatke.com/search/" in shop.history_url("ASIAN Wonder 13")
     assert "myntra.com" in shop.search_urls("white shoes")["Myntra"]
+
+    # keepa chart helpers (only Amazon has a public history source)
+    assert shop.asin("https://www.amazon.in/Sparx-White/dp/B07YP2F21T") == "B07YP2F21T"
+    assert shop.asin("https://www.flipkart.com/x/p/itm123") is None
+    assert "asin=B07YP2F21T" in shop.keepa_png("B07YP2F21T")
+    assert "domain=in" in shop.keepa_png("B07YP2F21T")
+
+
+def test_shop_watch_tracking(tmp_path, monkeypatch):
+    monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k")
+    monkeypatch.setattr(repo_state, "STATE_DIR", tmp_path)
+    from src import shop_watch as sw
+    monkeypatch.setattr(sw, "WATCH_JSON", tmp_path / "shop_watch.json")
+    monkeypatch.setattr(sw.time, "sleep", lambda s: None)
+
+    assert sw.add("ASIAN Wonder-13 white", "https://a.in/dp/B1", "Amazon", 569)
+    assert sw.add("Bushirt One Piece tee", "https://f.com/p/itm2", "Flipkart", 469)
+    assert sw.add("dupe", "https://a.in/dp/B1", "Amazon", 999)   # same url ignored
+    rows = sw.load()
+    assert len(rows) == 2 and rows[0]["history"][0]["p"] == 569
+
+    # day 2: one price drops 5% (alert), the other holds (silent)
+    prices = {"https://a.in/dp/B1": 540, "https://f.com/p/itm2": 469}
+    items, alerts = sw.check_all(fetch=lambda u, s: prices[u], today="2026-08-11")
+    assert len(alerts) == 1 and "540" in alerts[0] and "new low" in alerts[0]
+    assert len(items[0]["history"]) == 2
+
+    # same-day re-check refreshes the point instead of stacking a second one
+    items, _ = sw.check_all(fetch=lambda u, s: prices[u], today="2026-08-11")
+    assert len(items[0]["history"]) == 2
+
+    # a store that doesn't answer just skips the day
+    items, alerts = sw.check_all(fetch=lambda u, s: None, today="2026-08-12")
+    assert alerts == [] and len(items[0]["history"]) == 2
+
+    # target hit beats the % rule
+    rows = sw.load()
+    rows[0]["target"] = 500
+    sw.save(rows)
+    _, alerts = sw.check_all(fetch=lambda u, s: 499 if "B1" in u else 469,
+                             today="2026-08-13")
+    assert len(alerts) == 1 and "target" in alerts[0]
+
+    assert sw.remove("https://a.in/dp/B1")
+    assert len(sw.load()) == 1

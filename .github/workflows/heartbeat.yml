@@ -10,6 +10,10 @@ on:
     - cron: "15 10 * * 1-5"
   workflow_dispatch:
 
+# the midday run logs tracked shop prices back into state/
+permissions:
+  contents: write
+
 jobs:
   digest:
     runs-on: ubuntu-latest
@@ -38,4 +42,16 @@ jobs:
             python -m src.heartbeat morning
           else
             python -m src.heartbeat
+          fi
+      - name: commit tracked-price points
+        run: |
+          git config user.name "stock-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/shop_watch.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no tracked-price change"
+          else
+            git commit -m "chore: log tracked prices [skip ci]"
+            git pull --rebase origin main
+            git push
           fi

@@ -73,9 +73,41 @@ def search_urls(query: str) -> dict:
     }
 
 
-def history_url(title: str) -> str:
-    """Price-trend lookup on buyhatke for one listing."""
-    return "https://buyhatke.com/search/" + quote(title[:60])
+def asin(url: str) -> str | None:
+    m = re.search(r"/dp/([A-Z0-9]{10})", url or "")
+    return m.group(1) if m else None
+
+
+def keepa_png(asin_: str, days: int = 365) -> str:
+    """Keepa renders a free price-history chart per amazon.in ASIN — the
+    only store with a public history source; the rest we track ourselves."""
+    return ("https://graph.keepa.com/pricehistory.png"
+            f"?asin={asin_}&domain=in&range={days}")
+
+
+def current_price(url: str, source: str) -> float | None:
+    """Live price of ONE product page, for the tracked-items daily check."""
+    try:
+        if source == "Amazon":
+            html = _get(url)
+            if html:
+                m = re.search(r'class="a-price-whole">([\d,]+)', html)
+                if m:
+                    return _num(m.group(1))
+            md = _get_jina(url)                    # cloud/CI path
+            m = re.search(r"₹\s?([\d,]+)", md or "")
+            return _num(m.group(1)) if m else None
+        if source == "Flipkart":
+            html = _get(url, ua=_FIREFOX)
+            m = re.search(r'"price":"?([\d,.]+)"?', html or "")
+            return _num(m.group(1)) if m else None
+        if source == "Myntra":
+            html = _get(url, ua=_FIREFOX)
+            m = re.search(r'"discounted":\s*(\d+)', html or "")
+            return float(m.group(1)) if m else None
+    except Exception:
+        return None
+    return None
 
 
 def _num(text: str) -> float | None:
@@ -411,6 +443,7 @@ def advise(query: str, max_price: float | None = None) -> list[dict]:
     for r in rows:
         r["verdict"], r["why"] = judge(r)
         r["score"] = score(r, query, max_price)
-        r["history"] = history_url(r["title"])
+        a = asin(r["url"]) if r["source"] == "Amazon" else None
+        r["history"] = keepa_png(a) if a else None
     rows.sort(key=lambda r: -r["score"])
     return rows

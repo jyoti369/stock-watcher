@@ -29,7 +29,8 @@ except Exception:
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
                  datasource, db, finance_plan, fundamentals, gh_sync, importer,
                  ipo, mf, portfolio, projection, reminders, repo_state,
-                 scan_history, sectors, shop, suggestions, verdict, watcher)
+                 scan_history, sectors, shop, shop_watch, suggestions,
+                 verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -1546,7 +1547,9 @@ with tabs[9]:
                "of 5★ reviews can't beat thousands of 4★ ones) · 30% match "
                "with your words · 15% price inside your budget · 10% review "
                "depth · minus a nick for fake-MRP anchor tricks. "
-               "Top of the list = buy that one.")
+               "Top of the list = buy that one. 📌 tracks an item: the "
+               "midday brief re-checks its price every weekday and pings "
+               "you on a ≥3% drop.")
 
     with st.form("shop_form"):
         c1, c2 = st.columns([3, 1])
@@ -1559,6 +1562,15 @@ with tabs[9]:
     if shop_go and shop_q.strip():
         st.session_state["shop_q"] = shop_q.strip()
         st.session_state["shop_cap"] = shop_cap or None
+
+    def _track_btn(r, key):
+        if st.button("📌 Track", key=key,
+                     help="Daily price check + Telegram ping on a ≥3% drop"):
+            if shop_watch.add(r["title"], r["url"], r["source"], r.get("price")):
+                auto_sync()
+                st.toast(f"Tracking {r['title'][:40]}…")
+            else:
+                st.error("Couldn't save — state key missing.")
 
     if st.session_state.get("shop_q"):
         q, cap = st.session_state["shop_q"], st.session_state.get("shop_cap")
@@ -1591,19 +1603,32 @@ with tabs[9]:
                 else "reviews unknown"
             st.success(f"🏆 **Best bet — score {top['score']}/100** · "
                        f"₹{top['price']:g} · {stars} · {rev} · {top['source']}\n\n"
-                       f"**[{top['title'][:90]}]({top['url']})**\n\n"
-                       f"{top['why']} · [📉 price trend]({top['history']})")
+                       f"**[{top['title'][:90]}]({top['url']})**\n\n{top['why']}")
+            tc1, tc2 = st.columns([1, 6])
+            with tc1:
+                _track_btn(top, "trk_top")
+            if top.get("history"):
+                with st.expander("📉 price history (1 year, live from Keepa)",
+                                 expanded=True):
+                    st.image(top["history"])
 
-        for r in found[1:8]:
+        for i, r in enumerate(found[1:8]):
             left, right = st.columns([11, 2])
             stars = f"{r['rating']:g}★" if r.get("rating") else "?★"
             rev = f"{int(r['reviews']):,}" if r.get("reviews") else "?"
             left.markdown(
                 f"{badge.get(r['verdict'], '⚪')} **₹{r['price']:g}** · "
                 f"{stars} ({rev}) · {r['source']} — "
-                f"[{r['title'][:65]}]({r['url']}) · "
-                f"[📉]({r['history']})")
+                f"[{r['title'][:65]}]({r['url']})")
             left.caption(f"{r['verdict']}: {r['why']}")
+            with left:
+                bc1, bc2 = st.columns([1, 5])
+                with bc1:
+                    _track_btn(r, f"trk{i}")
+                if r.get("history"):
+                    with bc2:
+                        with st.expander("📉 price history"):
+                            st.image(r["history"])
             right.markdown(f"<div style='text-align:center;font-size:1.5em;"
                            f"font-weight:700'>{r['score']}</div>"
                            "<div style='text-align:center;font-size:0.7em;"
@@ -1616,8 +1641,50 @@ with tabs[9]:
                                 f"· {r['source']} — [{r['title'][:60]}]"
                                 f"({r['url']})")
         if found:
-            st.caption("📉 = price history/trend on buyhatke. Prices move all "
-                       "day during sales — re-search before paying.")
+            st.caption("📉 charts: Amazon items get Keepa's full history "
+                       "instantly; Flipkart/Myntra have no free source — "
+                       "📌 Track them and the app builds its own, one point "
+                       "per weekday. Prices move all day during sales — "
+                       "re-search before paying.")
         links = shop.search_urls(q)
         st.markdown("Hand-search: " + " · ".join(
             f"[{name}]({url})" for name, url in links.items()))
+
+    # ----------------------------------------------------------- tracked
+    tracked = shop_watch.load() or []
+    if tracked:
+        st.divider()
+        st.markdown(f"#### 📌 Tracked items ({len(tracked)})")
+        st.caption("Re-priced every weekday by the midday brief; Telegram "
+                   "ping on a ≥3% drop or your target price.")
+        for i, item in enumerate(tracked):
+            hist = item.get("history", [])
+            last = hist[-1]["p"] if hist else None
+            low = min((pt["p"] for pt in hist), default=None)
+            c1, c2 = st.columns([8, 4])
+            with c1:
+                st.markdown(f"**[{item['title'][:70]}]({item['url']})** · "
+                            f"{item['source']}")
+                bits = []
+                if last is not None:
+                    bits.append(f"last ₹{last:g}")
+                if low is not None and low != last:
+                    bits.append(f"low ₹{low:g}")
+                bits.append(f"since {item.get('added', '?')}")
+                st.caption(" · ".join(bits))
+                a = shop.asin(item["url"]) if item["source"] == "Amazon" else None
+                if a:
+                    with st.expander("📉 full history (Keepa)"):
+                        st.image(shop.keepa_png(a))
+                if st.button("🗑 Untrack", key=f"untrk{i}"):
+                    shop_watch.remove(item["url"])
+                    auto_sync()
+                    st.rerun()
+            with c2:
+                if len(hist) >= 2:
+                    st.line_chart(
+                        pd.DataFrame({"₹": [pt["p"] for pt in hist]},
+                                     index=[pt["d"][5:] for pt in hist]),
+                        height=140)
+                else:
+                    st.caption("chart appears after a couple of daily checks")

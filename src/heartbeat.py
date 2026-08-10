@@ -121,6 +121,13 @@ def send_morning() -> list[str]:
         parts.append("🎯 IPO screener (house rules: MB 20%/15x/QIB5x · "
                      "SME 35%/25x/QIB2x, last-day apply, 1 lot):\n"
                      + "\n".join("• " + ln for ln in ipos))
+    try:
+        from . import shop_watch
+        drops = shop_watch.digest_lines()
+    except Exception as e:                      # store blocks shouldn't kill the brief
+        drops = [f"(price tracker errored: {str(e)[:80]})"]
+    if drops:
+        parts.append("🛒 Tracked prices moved:\n" + "\n".join(drops))
     if not parts:
         print("[heartbeat] morning brief: nothing due, no open IPOs — staying quiet")
         return []
