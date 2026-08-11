@@ -1503,25 +1503,31 @@ with tabs[8]:
                "QIB ≥ 5x · **SME** needs GMP ≥ 35% + total ≥ 25x + QIB ≥ 2x (min "
                "application ~₹2L+, pure lottery). Always apply on the LAST day, "
                "late morning, 1 lot per PAN. GMP is unofficial and easiest to fake "
-               "in SME issues — QIB numbers are the honesty check. Data: ipowatch.in, "
-               "also in the 12:05pm Telegram brief.")
+               "in SME issues — QIB numbers are the honesty check. Data: "
+               "investorgain.com live (updates through the day; ipowatch.in as "
+               "fallback), also in the 12:05pm Telegram brief.")
 
-    @st.cache_data(ttl=1800, show_spinner=False)
+    @st.cache_data(ttl=600, show_spinner=False)
     def _ipo_screen_cached(bucket: str):
         return ipo.screen()
 
     if st.button("🔎 Check open IPOs now", type="primary"):
         st.session_state["ipo_checked"] = True
     if st.session_state.get("ipo_checked"):
-        with st.spinner("Scraping GMP + subscription tables…"):
-            # half-hour cache bucket so a tab hop doesn't re-scrape
+        with st.spinner("Pulling live GMP + subscription numbers…"):
+            # 10-min cache bucket so a tab hop doesn't re-scrape but a manual
+            # recheck during the last-day window stays close to live
             ipo_rows = _ipo_screen_cached(datetime.now().strftime("%Y%m%d%H")
-                                          + str(datetime.now().minute // 30))
+                                          + str(datetime.now().minute // 10))
         if not ipo_rows:
             st.warning("Couldn't read any IPO data right now — the source page "
                        "may be down or reshaped. Try again in a bit, or check "
-                       "ipowatch.in directly.")
+                       "investorgain.com directly.")
         else:
+            upd = next((r["updated"] for r in ipo_rows if r.get("updated")), "")
+            st.caption(f"Source: {ipo_rows[0].get('source', '?')}"
+                       + (f" · subscription updated **{upd}**" if upd else "")
+                       + " · this page re-pulls at most every 10 min")
             badge = {"APPLY-ZONE": "🟢", "WATCH": "🟡", "SKIP": "🔴", "NO DATA": "⚪"}
             for r in ipo_rows:
                 pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"

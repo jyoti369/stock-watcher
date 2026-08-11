@@ -525,6 +525,68 @@ def test_ipo_verdicts():
     assert ipo._num("--") is None
 
 
+def test_ipo_investorgain_parse():
+    from src import ipo
+    from datetime import date
+
+    # rows shaped exactly like the live report API (display HTML and all)
+    data = {"reportTableData": [
+        {"Name": '<a href="/subscription/x/1854/" title="Technocraft Ventures">'
+                 'Technocraft Ventures</a><br><span class="badge">IPO</span>'
+                 '<small><b>GMP:&#8377;<b>24</b> (11.32%)</b></small>',
+         "Total": '<b>15.26</b><br><small><b>11th Aug 13:10</b></small>',
+         "QIB": "8.86", "NII": "27.61", "RII": "13.63", "IPO Price": "212",
+         "~end_dt": "2026-08-11 00:00:00", "Closing Date": "11-08-2026",
+         "~IPO_Category": "IPO"},
+        {"Name": '<a href="/subscription/y/2/" title="Sham Foam">Sham Foam</a>'
+                 '<small><b>GMP:&#8377;<b>--</b> (0.00%)</b></small>',
+         "Total": "-", "QIB": "-", "NII": "-", "RII": "-", "IPO Price": "80",
+         "~end_dt": "2026-08-13 00:00:00", "~IPO_Category": "SME"},
+        {"Name": "<span>no title attr = unreadable, skipped</span>"},
+    ]}
+    rows = ipo._parse_investorgain(data)
+    assert len(rows) == 2
+    t = rows[0]
+    assert t["name"] == "Technocraft Ventures" and t["sme"] is False
+    assert t["gmp"] == 24.0 and t["gmp_pct"] == 11.3
+    assert t["total"] == 15.26 and t["qib"] == 8.86 and t["retail"] == 13.63
+    assert t["price"] == 212.0
+    assert t["updated"] == "11th Aug 13:10"
+    assert t["_closes"] == date(2026, 8, 11) and "August 11" in t["close"]
+    s = rows[1]
+    assert s["sme"] is True
+    assert s["gmp"] is None and s["gmp_pct"] is None    # '--' = no GMP quoted
+    assert s["total"] is None and s["qib"] is None
+
+    # financial-year path segment (Indian FY, April cutover)
+    assert ipo._fy(date(2026, 8, 11)) == "2026-27"
+    assert ipo._fy(date(2027, 2, 1)) == "2026-27"
+    assert ipo._fy(date(2027, 4, 1)) == "2027-28"
+
+
+def test_heartbeat_reminder_split(monkeypatch):
+    from datetime import date, timedelta
+    from src import heartbeat, reminders
+
+    today = date.today()
+    rows = [
+        reminders.new("pay advance tax", today.isoformat()),
+        reminders.new("IPO last day: apply", (today + timedelta(days=1)).isoformat()),
+        reminders.new("check allotment", (today + timedelta(days=4)).isoformat()),
+        reminders.new("renew FD", (today - timedelta(days=2)).isoformat()),
+        reminders.new("far away", (today + timedelta(days=30)).isoformat()),
+    ]
+    monkeypatch.setattr(heartbeat.reminders, "load", lambda: rows)
+    now, later = heartbeat.reminder_due_lines()
+    # today + overdue land in "now"; tomorrow/this-week in "later"; far future absent
+    assert len(now) == 2 and len(later) == 2
+    assert any("pay advance tax" in ln for ln in now)
+    assert any("overdue" in ln for ln in now if "renew FD" in ln)
+    assert any("tomorrow" in ln for ln in later if "IPO last day" in ln)
+    assert any("in 4 days" in ln for ln in later if "check allotment" in ln)
+    assert not any("far away" in ln for ln in now + later)
+
+
 def test_shop_judge_and_parse():
     from src import shop
 
@@ -645,6 +707,8 @@ def test_shop_scoring_and_new_stores():
 
 
 def test_shop_watch_tracking(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+
     monkeypatch.setenv("STOCKWATCH_STATE_KEY", "k")
     monkeypatch.setattr(repo_state, "STATE_DIR", tmp_path)
     from src import shop_watch as sw
@@ -657,18 +721,24 @@ def test_shop_watch_tracking(tmp_path, monkeypatch):
     rows = sw.load()
     assert len(rows) == 2 and rows[0]["history"][0]["p"] == 569
 
+    # add() seeds a point dated the real today, so the "next days" must be
+    # relative — hardcoded dates made this test rot in a day
+    day2 = (date.today() + timedelta(days=1)).isoformat()
+    day3 = (date.today() + timedelta(days=2)).isoformat()
+    day4 = (date.today() + timedelta(days=3)).isoformat()
+
     # day 2: one price drops 5% (alert), the other holds (silent)
     prices = {"https://a.in/dp/B1": 540, "https://f.com/p/itm2": 469}
-    items, alerts = sw.check_all(fetch=lambda u, s: prices[u], today="2026-08-11")
+    items, alerts = sw.check_all(fetch=lambda u, s: prices[u], today=day2)
     assert len(alerts) == 1 and "540" in alerts[0] and "new low" in alerts[0]
     assert len(items[0]["history"]) == 2
 
     # same-day re-check refreshes the point instead of stacking a second one
-    items, _ = sw.check_all(fetch=lambda u, s: prices[u], today="2026-08-11")
+    items, _ = sw.check_all(fetch=lambda u, s: prices[u], today=day2)
     assert len(items[0]["history"]) == 2
 
     # a store that doesn't answer just skips the day
-    items, alerts = sw.check_all(fetch=lambda u, s: None, today="2026-08-12")
+    items, alerts = sw.check_all(fetch=lambda u, s: None, today=day3)
     assert alerts == [] and len(items[0]["history"]) == 2
 
     # target hit beats the % rule
@@ -676,7 +746,7 @@ def test_shop_watch_tracking(tmp_path, monkeypatch):
     rows[0]["target"] = 500
     sw.save(rows)
     _, alerts = sw.check_all(fetch=lambda u, s: 499 if "B1" in u else 469,
-                             today="2026-08-13")
+                             today=day4)
     assert len(alerts) == 1 and "target" in alerts[0]
 
     assert sw.remove("https://a.in/dp/B1")

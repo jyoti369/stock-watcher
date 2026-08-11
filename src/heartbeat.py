@@ -67,19 +67,32 @@ def review_due_lines() -> list[str]:
     return out
 
 
-def reminder_due_lines() -> list[str]:
-    """Dated reminders arriving within a week (empty without the key)."""
+def reminder_due_lines() -> tuple[list[str], list[str]]:
+    """Dated reminders as (due today or overdue, coming up within a week).
+
+    Kept separate because a line like "X IPO last day" sitting under a plain
+    "Due:" header reads as TODAY even when its date is tomorrow. Both lists
+    are empty without the key.
+    """
     rows = reminders.load()
     if not rows:
-        return []
+        return [], []
     today = date.today()
-    out = []
+    now, later = [], []
     for r in rows:
-        if reminders.due(r, today):
-            eff = reminders.effective_date(r, today)
-            when = advice.pretty_date(eff.isoformat()) if eff else ""
-            out.append(f"• {r['text']}" + (f" (by {when})" if when else ""))
-    return out
+        if not reminders.due(r, today):
+            continue
+        eff = reminders.effective_date(r, today)
+        when = advice.pretty_date(eff.isoformat()) if eff else ""
+        if eff and eff > today:
+            gap = (eff - today).days
+            later.append(f"• {when} ({'tomorrow' if gap == 1 else f'in {gap} days'}): "
+                         f"{r['text']}")
+        elif eff and eff < today:
+            now.append(f"• {r['text']} (was due {when} — overdue)")
+        else:
+            now.append(f"• {r['text']}")
+    return now, later
 
 
 def send_daily() -> list[str]:
@@ -92,9 +105,11 @@ def send_daily() -> list[str]:
     reviews = review_due_lines()
     if reviews:
         body += "\n\n⏰ Advice review due:\n" + "\n".join(reviews)
-    rem = reminder_due_lines()
-    if rem:
-        body += "\n\n📅 Reminders due:\n" + "\n".join(rem)
+    due_now, upcoming = reminder_due_lines()
+    if due_now:
+        body += "\n\n📅 Reminders due today:\n" + "\n".join(due_now)
+    if upcoming:
+        body += "\n\n📆 Coming up (not due yet):\n" + "\n".join(upcoming)
     body += f"\n\nWatcher {health} · {n_rules} rule(s) active · {n_fired} alert(s) fired today."
     body += "\n\n(daily heartbeat — if you got this, the watcher is alive; silence from it means nothing triggered)"
     channels = alerts.dispatch("📊 Stock Watcher — daily digest", body)
@@ -107,9 +122,11 @@ def send_morning() -> list[str]:
     """Midday action brief: due reminders/advice + IPO screener. Skips the
     send entirely when there's nothing to act on — no noise, only signal."""
     parts = []
-    rem = reminder_due_lines()
-    if rem:
-        parts.append("📅 Due:\n" + "\n".join(rem))
+    due_now, upcoming = reminder_due_lines()
+    if due_now:
+        parts.append("📅 Due TODAY:\n" + "\n".join(due_now))
+    if upcoming:
+        parts.append("📆 Coming up (not due yet):\n" + "\n".join(upcoming))
     reviews = review_due_lines()
     if reviews:
         parts.append("⏰ Advice review due:\n" + "\n".join(reviews))

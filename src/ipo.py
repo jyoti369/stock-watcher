@@ -13,9 +13,12 @@ Always apply on the LAST day, late morning: allotment odds don't depend on
 when you bid, so waiting is free information. One lot per PAN — extra lots
 don't raise the odds in an oversubscribed retail book.
 
-Data comes from ipowatch.in's public GMP and subscription pages, parsed
-defensively (their tables change shape now and then). Everything degrades to
-"no data" rather than crashing the tab.
+Data: investorgain.com's live report API first — one call carries GMP,
+total/QIB/NII/retail subscription, close date and an update timestamp, and it
+refreshes through the day (ipowatch.in's tables turned out to lag a day
+behind on last-day numbers, which is exactly when they matter). ipowatch's
+GMP + subscription pages stay as the fallback when the API is unreachable.
+Everything degrades to "no data" rather than crashing the tab.
 """
 from __future__ import annotations
 
@@ -26,6 +29,10 @@ import requests
 
 GMP_URL = "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/"
 SUB_URL = "https://ipowatch.in/ipo-subscription-status-today/"
+# investorgain live subscription report (id 333) — the same JSON their site's
+# table loads; month/year/FY path segments select the current slice
+IG_URL = ("https://webnodejs.investorgain.com/cloud/v2/report/data-read/"
+          "333/1/{m}/{y}/{fy}/0/all?search=&v=1")
 _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 RULES = {
@@ -132,6 +139,59 @@ def fetch_subscriptions() -> list[dict]:
     return out
 
 
+def _fy(d: date) -> str:
+    """Indian financial year path segment, e.g. 2026-08-11 -> '2026-27'."""
+    y = d.year if d.month >= 4 else d.year - 1
+    return f"{y}-{str(y + 1)[-2:]}"
+
+
+def _parse_investorgain(data: dict) -> list[dict]:
+    """Rows from the report JSON. Values arrive wrapped in display HTML
+    (name anchor carries the GMP, Total carries its update time), so this
+    picks them out with regexes and skips any row it can't read."""
+    out = []
+    for r in data.get("reportTableData") or []:
+        name_html = str(r.get("Name", ""))
+        m = re.search(r'title="([^"]+)"', name_html)
+        if not m:
+            continue
+        row = {"name": m.group(1),
+               "sme": "SME" in str(r.get("~IPO_Category", "")).upper()
+               or "SME" in re.sub(r"<[^>]+>", " ", name_html)}
+        g = re.search(r"GMP:\S*?<b>(--|[\d.]+)</b>\s*\(([\d.]+)%", name_html)
+        row["gmp"] = _num(g.group(1)) if g else None
+        row["gmp_pct"] = (round(float(g.group(2)), 1) or None) if g else None
+        total_html = str(r.get("Total", ""))
+        t = re.search(r"<b>([\d.]+)</b>", total_html)
+        row["total"] = float(t.group(1)) if t else None
+        for key, col in (("qib", "QIB"), ("nii", "NII"), ("retail", "RII")):
+            row[key] = _num(r.get(col))
+        row["price"] = _num(r.get("IPO Price"))
+        u = re.search(r"(\d{1,2}(?:st|nd|rd|th)?\s+\w{3,9}\s+\d{1,2}:\d{2})",
+                      re.sub(r"<[^>]+>", " ", total_html))
+        row["updated"] = u.group(1) if u else ""
+        try:
+            closes = date.fromisoformat(str(r.get("~end_dt", ""))[:10])
+        except ValueError:
+            closes = _close_date(r.get("Closing Date", ""))
+        row["_closes"] = closes
+        row["close"] = closes.strftime("%B %d, %Y") if closes else ""
+        out.append(row)
+    return out
+
+
+def fetch_investorgain() -> list[dict]:
+    """Live rows (see _parse_investorgain). [] on any failure — the caller
+    then falls back to the ipowatch pages."""
+    today = date.today()
+    url = IG_URL.format(m=today.month, y=today.year, fy=_fy(today))
+    try:
+        return _parse_investorgain(
+            requests.get(url, timeout=25, headers=_UA).json())
+    except Exception:
+        return []
+
+
 def _close_date(text: str) -> date | None:
     for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d-%m-%Y"):
         try:
@@ -142,21 +202,29 @@ def _close_date(text: str) -> date | None:
 
 
 def screen() -> list[dict]:
-    """Join GMP + subscription by name and attach a verdict per house rules.
-    Only issues still open (close date today or later) make the list — the
-    source table is a running archive of the whole year."""
-    gmp = {_norm(g["name"]): g for g in fetch_gmp()}
+    """Open IPOs (close date today or later) with a house-rules verdict each.
+    investorgain first (live, one call); on failure, join ipowatch's GMP +
+    subscription pages by name — that source runs about a day behind."""
     today = date.today()
     merged = []
-    for s in fetch_subscriptions():
-        closes = _close_date(s.get("close", ""))
-        if closes is None or closes < today:
-            continue
-        g = gmp.get(_norm(s["name"]), {})
-        row = {**s, "gmp": g.get("gmp"), "price": g.get("price"),
-               "gmp_pct": g.get("gmp_pct")}
+    for r in fetch_investorgain():
+        closes = r.pop("_closes", None)
+        if closes and closes >= today:
+            merged.append(r)
+    source = "investorgain.com (live)"
+    if not merged:
+        source = "ipowatch.in (can lag a day)"
+        gmp = {_norm(g["name"]): g for g in fetch_gmp()}
+        for s in fetch_subscriptions():
+            closes = _close_date(s.get("close", ""))
+            if closes is None or closes < today:
+                continue
+            g = gmp.get(_norm(s["name"]), {})
+            merged.append({**s, "gmp": g.get("gmp"), "price": g.get("price"),
+                           "gmp_pct": g.get("gmp_pct"), "updated": ""})
+    for row in merged:
+        row["source"] = source
         row["verdict"], row["why"] = verdict(row)
-        merged.append(row)
     order = {"APPLY-ZONE": 0, "WATCH": 1, "SKIP": 2, "NO DATA": 3}
     merged.sort(key=lambda r: (order.get(r["verdict"], 9), -(r["gmp_pct"] or 0)))
     return merged
@@ -202,6 +270,11 @@ def digest_lines(max_rows: int = 6) -> list[str]:
         kind = "SME" if r.get("sme") else "MB"
         pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"
         tot = f"{r['total']:g}x" if r.get("total") is not None else "?"
+        qib = f"{r['qib']:g}x" if r.get("qib") is not None else "?"
         out.append(f"[{r['verdict']}] {r['name']} ({kind}) — GMP {pct}, "
-                   f"sub {tot}, closes {r.get('close') or '?'}")
+                   f"sub {tot}, QIB {qib}, closes {r.get('close') or '?'}")
+    if rows:
+        upd = next((r["updated"] for r in rows if r.get("updated")), "")
+        out.append(f"(numbers from {rows[0].get('source', '?')}"
+                   + (f", as of {upd}" if upd else "") + ")")
     return out
