@@ -675,6 +675,119 @@ def test_portfolio_block_wording():
     assert heartbeat.portfolio_block({}) == []          # nothing owned, no block
 
 
+def test_insights_are_derived_from_real_numbers():
+    from datetime import timedelta
+    from src import clock, insights
+
+    today = clock.ist_today()
+    positions = [
+        {"symbol": "ASIANPAINT", "value": 51000.0, "pnl": 2852.0, "pnl_pct": 5.9},
+        {"symbol": "ITC", "value": 5560.0, "pnl": -2867.0, "pnl_pct": -34.0},
+        {"symbol": "SUZLON", "value": 3000.0, "pnl": -1514.0, "pnl_pct": -33.4},
+        {"symbol": "GRAPHITE", "value": 5054.0, "pnl": 1059.0, "pnl_pct": 26.5},
+        {"symbol": "NIPPON ETF JUNI.", "value": None, "pnl": None, "pnl_pct": None},
+    ]
+    totals = {"value": 64614.0, "pnl": -3470.0}
+
+    # concentration: 51000/64614 = 79%, and the tip must say so
+    conc = insights.concentration(positions, totals["value"])
+    assert conc and "79%" in conc[0]["text"] and "ASIANPAINT" in conc[0]["text"]
+    assert insights.concentration(positions[1:], 20000.0) == []   # nothing dominant
+
+    # a big loss only earns a tip when the fundamentals are weak too
+    assert insights.broken_thesis(positions, {"ITC": "OK"}) == []
+    broken = insights.broken_thesis(positions, {"ITC": "Weak"})
+    assert broken and "ITC is down 34%" in broken[0]["text"]
+
+    # unprotected: ITC and SUZLON are down >10% with no stop anywhere
+    bare = insights.unprotected_losers(positions, [], [])
+    assert {t["key"] for t in bare} == {"nostop:ITC", "nostop:SUZLON"}
+    # a stop in the ledger, or a price-below alert rule, both count as covered
+    guarded = insights.unprotected_losers(
+        positions, [{"symbol": "ITC", "status": "OPEN", "stop_below": 250}],
+        [{"symbol": "SUZLON", "active": 1,
+          "conditions": [{"metric": "price", "op": "<", "value": 40}]}])
+    assert guarded == []
+
+    won = insights.unplanned_winners(positions, [])
+    assert won and "GRAPHITE is up 26%" in won[0]["text"]
+    assert insights.unplanned_winners(
+        positions, [{"symbol": "GRAPHITE", "status": "OPEN",
+                     "sell_above": 900}]) == []
+
+    gaps = insights.data_gaps(positions, [{"name": "x", "units": None}])
+    assert any("NIPPON ETF JUNI." in t["text"] for t in gaps)
+    assert any(t["key"] == "mfgaps" for t in gaps)
+
+    # tax: only when the 12-month line is close AND the position is in profit
+    holdings = [{"symbol": "GRAPHITE", "qty": 7, "buy_price": 570.0,
+                 "buy_date": (today - timedelta(days=340)).isoformat()},
+                {"symbol": "ITC", "qty": 20, "buy_price": 420.0,
+                 "buy_date": (today - timedelta(days=340)).isoformat()}]
+    lt = insights.ltcg_countdown(holdings, {"GRAPHITE": 722.0, "ITC": 278.0}, today)
+    assert len(lt) == 1 and "GRAPHITE turns long-term in 25 days" in lt[0]["text"]
+    assert "12.5%" in lt[0]["why"] and "20%" in lt[0]["why"]
+    # far from the line, or a loss, earns nothing
+    assert insights.ltcg_countdown(
+        [{**holdings[0], "buy_date": (today - timedelta(days=30)).isoformat()}],
+        {"GRAPHITE": 722.0}, today) == []
+
+    assert insights.missing_buy_dates([{"symbol": "X"}, holdings[0]])[0]["text"] \
+        .startswith("1 of your 2 holdings")
+    assert insights.missing_buy_dates([{"symbol": "X"}])[0]["text"] \
+        .startswith("None of your 1 holdings")
+
+    # the share must be of the losses, not of the net figure: winners offsetting
+    # them once produced "105% of your total loss"
+    conc_loss = insights.loss_is_concentrated(positions, totals)
+    assert conc_loss and int(conc_loss[0]["text"].split("%")[0]) <= 100
+    assert "everything you're down" in conc_loss[0]["text"]
+
+    # a standing rule true for days is noise, not information
+    nag = insights.nagging_rule([{"id": 1, "symbol": "INFY", "active": 1,
+                                  "mode": "level", "label": "below 200dma dip",
+                                  "true_since": (today - timedelta(days=9)).isoformat()}],
+                                today)
+    assert nag and "true for 9 days straight" in nag[0]["text"]
+
+
+def test_insight_choice_is_stable_and_respects_settings():
+    from src import insights
+
+    tips = [insights.tip("urgent", "risk", 80, "urgent thing"),
+            insights.tip("mid", "tax", 50, "middling thing"),
+            insights.tip("low", "ipo", 12, "house note")]
+    # urgent always shows, and the same seed picks the same companions
+    first = insights.choose(tips, n=2, seed=7)
+    assert first[0]["key"] == "urgent"
+    assert [t["key"] for t in first] == [t["key"] for t in insights.choose(tips, n=2, seed=7)]
+    # switching a category off removes it entirely
+    assert all(t["category"] != "ipo" for t in
+               insights.choose(tips, n=3, seed=1, categories=["risk", "tax"]))
+    # urgent-only mode drops the general ones
+    only = insights.choose(tips, n=3, seed=1, min_urgency=60)
+    assert [t["key"] for t in only] == ["urgent"]
+    assert insights.choose([], n=2) == []
+
+
+def test_settings_roundtrip_and_defaults(tmp_path, monkeypatch):
+    from src import settings
+
+    monkeypatch.setattr(settings, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(settings, "SETTINGS_JSON", tmp_path / "settings.json")
+    assert settings.load() == settings.DEFAULTS          # nothing saved yet
+    assert settings.get("banner") is True
+
+    settings.save({"banner": False, "banner_tips": 3})
+    got = settings.load()
+    assert got["banner"] is False and got["banner_tips"] == 3
+    assert got["explainers"] is True                     # untouched key kept
+    assert set(got) == set(settings.DEFAULTS)            # no junk keys
+
+    (tmp_path / "settings.json").write_text("{not json")
+    assert settings.load() == settings.DEFAULTS          # corrupt file can't break it
+
+
 def test_html_mail_colours_each_number_for_itself():
     from src import fmt, mailhtml
 

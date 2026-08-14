@@ -19,7 +19,8 @@ from .repo_state import STATE_DIR
 
 REPO = os.environ.get("STOCKWATCH_GH_REPO", "jyoti369/stock-watcher")
 FILES = ["watchlist.json", "rules.json", "holdings.json", "suggestions_history.json",
-         "finance_plan.json", "mf_holdings.json", "advice.json", "reminders.json"]
+         "finance_plan.json", "mf_holdings.json", "advice.json", "reminders.json",
+         "settings.json"]
 API = "https://api.github.com"
 
 

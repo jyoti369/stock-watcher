@@ -21,8 +21,8 @@ from __future__ import annotations
 import sys
 from datetime import date
 
-from . import (advice, alerts, analysis, clock, datasource, db, fmt, ipo,
-               mailhtml, portfolio, reminders, watcher)
+from . import (advice, alerts, analysis, clock, datasource, db, fmt, insights,
+               ipo, mailhtml, portfolio, reminders, settings, watcher)
 
 _OVERDUE_SHOWN = 4          # older ones get counted, not listed
 _POSITIONS_SHOWN = 12       # the rest roll into one summary line
@@ -80,7 +80,8 @@ def money_report() -> dict:
     # so a 20-position list doesn't bury what actually moves your money
     shown = positions[:_POSITIONS_SHOWN]
     for p in shown:
-        p["weak"] = bool(_weak_note(p["symbol"], watch))
+        p["rating"] = _rating(p["symbol"], watch)
+        p["weak"] = p["rating"] == "Weak"
         if p["value"] is None:
             unpriced.append(p["symbol"])
     rest = positions[_POSITIONS_SHOWN:]
@@ -145,18 +146,26 @@ def text_stock_lines(report: dict) -> list[str]:
     return lines
 
 
-def _weak_note(symbol: str, watch: dict) -> str:
-    """A words-only warning when the business itself looks shaky. Only for
-    watchlist names, whose fundamentals we've already fetched this run — the
-    old coloured 'health' dot sat next to a red price and read as "up"."""
+def _rating(symbol: str, watch: dict) -> str | None:
+    """The business-quality band, but only for watchlist names — their
+    fundamentals are already fetched this run, and pulling it for every holding
+    would triple the job's network use for a word in one line.
+
+    A weak rating is shown as words now: the old coloured 'health' dot sat next
+    to a red price and read as "up".
+    """
     exchange = next((e for (s, e) in watch if s == symbol), None)
     if exchange is None:
-        return ""
+        return None
     try:
-        rating = analysis.score_fundamentals(symbol, exchange).get("rating")
+        return analysis.score_fundamentals(symbol, exchange).get("rating")
     except Exception:
-        return ""
-    return " · ⚠️ its fundamentals score weak" if rating == "Weak" else ""
+        return None
+
+
+def _weak_note(symbol: str, watch: dict) -> str:
+    return " · ⚠️ its fundamentals score weak" \
+        if _rating(symbol, watch) == "Weak" else ""
 
 
 def portfolio_block(totals: dict) -> list[str]:
@@ -257,6 +266,31 @@ def review_buckets(today: date | None = None) -> dict[str, list[str]]:
 
 # ---- the two mails -------------------------------------------------------
 
+def worth_knowing(report: dict, today: date, limit: int = 1) -> list[dict]:
+    """The one thing the app noticed today, for the bottom of the digest.
+
+    Same engine as the app's banner, so the mail and the dashboard can't
+    disagree. Off when you've turned digest tips off in Settings; never raises,
+    because a tip is the least important thing in the mail.
+    """
+    if not settings.get("digest_tips"):
+        return []
+    try:
+        return insights.choose(insights.collect(
+            positions=report["positions"], tail=report.get("tail"),
+            totals=report["totals"], holdings=db.get_holdings(),
+            prices={p["symbol"]: p.get("price") for p in report["positions"]},
+            ratings={p["symbol"]: p.get("rating") for p in report["positions"]},
+            advice_rows=advice.load_advice() or [],
+            rules=db.get_rules(active_only=False),
+            history=db.get_alert_history(limit=100),
+            reminders_rows=reminders.load() or [], today=today),
+            n=limit, seed=today.toordinal())
+    except Exception as e:
+        print(f"[heartbeat] tips skipped: {str(e)[:120]}")
+        return []
+
+
 def _dated(items: list[dict], today: date) -> list[dict]:
     """Reminder items in the shape the HTML renderer wants."""
     return [{"text": i["text"],
@@ -334,6 +368,15 @@ def send_daily() -> list[str]:
             "Advice ledger — calls to revisit",
             mailhtml.bullets([ln.lstrip("• ")
                               for ln in rev["overdue"] + rev["due"]])))
+
+    for t in worth_knowing(report, today):
+        parts.append("💡 Worth knowing\n" + insights.as_text(t)
+                     + (f"\n{t['action']}" if t.get("action") else ""))
+        html_blocks.append(mailhtml.section(
+            "Worth knowing",
+            mailhtml.dated_items([{"text": t["text"],
+                                   "when": " ".join(x for x in (t.get("why"),
+                                                                t.get("action")) if x)}])))
 
     n_rules = len(db.get_rules(active_only=True))
     health = "Watcher is healthy" if report["unavailable"] == 0 else \

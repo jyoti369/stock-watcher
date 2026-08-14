@@ -28,9 +28,9 @@ except Exception:
 
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
                  clock, datasource, db, finance_plan, fmt, fundamentals,
-                 gh_sync, importer, ipo, mf, portfolio, projection, reminders,
-                 repo_state, scan_history, sectors, shop, shop_watch,
-                 suggestions, verdict, watcher)
+                 gh_sync, importer, insights, ipo, mf, portfolio, projection,
+                 reminders, repo_state, scan_history, sectors, settings, shop,
+                 shop_watch, suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -165,7 +165,8 @@ def sync_to_github() -> tuple[bool, str]:
         subprocess.run(["git", "add", "state/watchlist.json", "state/rules.json",
                         "state/holdings.json", "state/suggestions_history.json",
                         "state/finance_plan.json", "state/mf_holdings.json",
-                        "state/advice.json", "state/reminders.json"],
+                        "state/advice.json", "state/reminders.json",
+                        "state/settings.json"],
                        check=True, cwd=str(repo_state.ROOT), capture_output=True)
         r = subprocess.run(["git", "commit", "-m", "update watchlist/rules"],
                            cwd=str(repo_state.ROOT), capture_output=True, text=True)
@@ -552,9 +553,76 @@ _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
 st.session_state["_warmed"] = True
 _warm_ph.empty()
+
+PREFS = settings.load()
+
+
+def explain(text: str) -> None:
+    """A 'how to read this' caption — hidden when you've turned explainers off
+    in Settings, because the same paragraph stops being help after a week."""
+    if PREFS.get("explainers", True):
+        st.caption(text)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _tips(bucket: str) -> list[dict]:
+    """Everything the app has noticed, from data that's already warm.
+
+    Cached for 15 minutes so it costs nothing per rerun — the banner must never
+    be the reason a tap feels slow.
+    """
+    holdings = db.get_holdings()
+    prices, ratings = {}, {}
+    for h in holdings:
+        v = watcher.gather_values(h["symbol"], h["exchange"])
+        prices[h["symbol"]] = v.get("price")
+    lots = [portfolio.lot_row(h, {"price": prices.get(h["symbol"]),
+                                  "pct_change_day": None}) for h in holdings]
+    positions = portfolio.by_symbol(lots)
+    for p in positions[:6]:            # ratings only for the big ones — it's slow
+        try:
+            ratings[p["symbol"]] = analysis.score_fundamentals(
+                p["symbol"], "NSE").get("rating")
+        except Exception:
+            pass
+    return insights.collect(
+        positions=positions[:12],
+        tail={"count": len(positions[12:]),
+              "value": sum(p["value"] or 0 for p in positions[12:]),
+              "pnl": sum(p["pnl"] or 0 for p in positions[12:]),
+              "names": ""} if len(positions) > 12 else None,
+        totals=portfolio.totals(lots) if lots else {},
+        holdings=holdings, prices=prices, ratings=ratings,
+        advice_rows=advice.load_advice() or [], rules=db.get_rules(active_only=False),
+        history=db.get_alert_history(limit=100), reminders_rows=reminders.load() or [],
+        mf_rows=mf.load_mf() or [])
+
+
+if PREFS.get("banner", True):
+    _all_tips = _tips(clock.ist_now().strftime("%Y%m%d%H") +
+                      str(clock.ist_now().minute // 15))
+    _shown = insights.choose(_all_tips, n=int(PREFS.get("banner_tips", 2)),
+                             seed=st.session_state.get("_tip_seed", 0),
+                             categories=PREFS.get("banner_categories"),
+                             min_urgency=int(PREFS.get("banner_min_urgency", 0)))
+    if _shown:
+        with st.container(border=True):
+            bc1, bc2 = st.columns([12, 1])
+            with bc1:
+                for t in _shown:
+                    icon = "⚠️" if t["urgency"] >= 60 else "💡"
+                    st.markdown(f"{icon} **{t['text']}**")
+                    line = " ".join(x for x in (t.get("why"), t.get("action")) if x)
+                    if line:
+                        st.caption(line)
+            if bc2.button("↻", key="tip_next", help="Show me different tips"):
+                st.session_state["_tip_seed"] = \
+                    st.session_state.get("_tip_seed", 0) + 1
+                st.rerun()
+
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
                 "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice",
-                "💬 Advisor", "🎯 IPO", "🛒 Buy"])
+                "💬 Advisor", "🎯 IPO", "🛒 Buy", "⚙️ Settings"])
 
 # ================================================================ overview
 with tabs[0]:
@@ -587,7 +655,7 @@ with tabs[0]:
                            "P/E": "{:.1f}", "ROE %": "{:.1f}%", "RSI": "{:.0f}"}, na_rep="—"))
         _ov_ph.empty()
         st.dataframe(styled, width="stretch", hide_index=True)
-        st.caption("**Health** = share of fundamental checks passed: 65+ 🟢 OK · 40–64 🟡 Mixed · "
+        explain("**Health** = share of fundamental checks passed: 65+ 🟢 OK · 40–64 🟡 Mixed · "
                    "<40 🔴 Weak — about the business, not the price. **RSI** is a 0–100 momentum "
                    "gauge (under 30 = heavily sold off, over 70 = heavily bought). **P/E** = price "
                    "÷ a year's profit per share. Open **Stock analysis** for the deep view + bottom "
@@ -755,7 +823,7 @@ with tabs[1]:
                         "P&L": lambda v: fmt.signed_inr(v), "P&L %": "{:+.1f}%"},
                        na_rep="—"),
             width="stretch", hide_index=True)
-        st.caption("P&L is vs your buy price (dividends not counted). Health = the business "
+        explain("P&L is vs your buy price (dividends not counted). Health = the business "
                    "quality read — open **Stock analysis** for the full picture + bottom line.")
 
         with st.expander("⚙️ Manage holdings"):
@@ -772,7 +840,7 @@ with tabs[1]:
     # ---------------------------------------------------------- mutual funds
     st.divider()
     st.subheader("🪙 Mutual funds")
-    st.caption("Units × the **official AMFI NAV** (published daily by the MF industry "
+    explain("Units × the **official AMFI NAV** (published daily by the MF industry "
                "body — same number your fund house reports). Rows still waiting for "
                "unit allotment show as estimates until units are filled in.")
 
@@ -831,7 +899,7 @@ with tabs[1]:
                         "Invested": _rupees, "P&L": lambda v: fmt.signed_inr(v),
                         "P&L %": "{:+.1f}%"}, na_rep="—"),
             width="stretch", hide_index=True)
-        st.caption("P&L needs the invested amount — rows without it show value only. "
+        explain("P&L needs the invested amount — rows without it show value only. "
                    "The monthly CAS statement (CAMS/KFintech email) has exact units for "
                    "every fund you own anywhere; use it to replace the estimates.")
 
@@ -927,7 +995,7 @@ with tabs[1]:
 # ============================================================= suggestions
 with tabs[2]:
     st.subheader("💡 Suggestions")
-    st.caption("Ranked by an opportunity score from **real data** — fundamental health, "
+    explain("Ranked by an opportunity score from **real data** — fundamental health, "
                "distance below analysts' target, and trend. Each pick is then deep-checked "
                "(statements, peers, bear case) so you see the reasons *for and against*.")
 
@@ -1643,7 +1711,7 @@ with tabs[7]:
 # ================================================================ ipo screener
 with tabs[8]:
     st.subheader("🎯 IPO screener — apply-for-the-listing-pop rules")
-    st.caption("House rules, tuned for the flip strategy (apply → sell in the first "
+    explain("House rules, tuned for the flip strategy (apply → sell in the first "
                "30 min of listing): **Mainboard** needs GMP ≥ 20% + total ≥ 15x + "
                "QIB ≥ 5x · **SME** needs GMP ≥ 35% + total ≥ 25x + QIB ≥ 2x (min "
                "application ~₹2L+, pure lottery). Always apply on the LAST day, "
@@ -1687,7 +1755,7 @@ with tabs[8]:
                     + ("**⏳ last day — bids close 4 pm today**" if last_day
                        else ipo.closing_phrase(r, today_ist)))
                 st.caption(f"{r['verdict']}: {r['why']}")
-            st.caption("APPLY-ZONE = passes every bar **today** — still apply only "
+            explain("APPLY-ZONE = passes every bar **today** — still apply only "
                        "on the last day. WATCH = GMP qualifies but the book is "
                        "still filling (normal on day 1-2). Numbers move all day; "
                        "recheck before paying.")
@@ -1695,7 +1763,7 @@ with tabs[8]:
 # ================================================================ buy advisor
 with tabs[9]:
     st.subheader("🛒 Buy advisor — one score, one pick")
-    st.caption("Searches **Amazon + Flipkart + Myntra** live, drops listings "
+    explain("Searches **Amazon + Flipkart + Myntra** live, drops listings "
                "that don't match what you typed, and boils each one down to "
                "a **0–100 score**: 45% quality (rating, shrunk so a handful "
                "of 5★ reviews can't beat thousands of 4★ ones) · 30% match "
@@ -1850,3 +1918,67 @@ with tabs[9]:
                         height=140)
                 else:
                     st.caption("chart appears after a couple of daily checks")
+
+# ================================================================== settings
+with tabs[10]:
+    st.subheader("⚙️ Settings")
+    st.caption("Preferences live in `state/settings.json` and sync with the rest "
+               "of the app, so the phone and the laptop agree.")
+
+    with st.form("prefs"):
+        st.markdown("**💡 Smart banner**")
+        st.caption("The strip above the tabs. Every line in it is computed from "
+                   "your own holdings, rules, ledger and reminders — it's the app "
+                   "noticing things across tabs that no single tab can see.")
+        p_banner = st.checkbox("Show the banner", value=PREFS["banner"])
+        pb1, pb2 = st.columns(2)
+        p_count = pb1.slider("How many at once", 1, 3,
+                             int(PREFS["banner_tips"]))
+        p_urgency = pb2.select_slider(
+            "What's worth showing", options=[0, 40, 60],
+            value=int(PREFS.get("banner_min_urgency", 0)),
+            format_func=lambda v: {0: "Everything, including house tips",
+                                   40: "Skip the general tips",
+                                   60: "Only things that look urgent"}[v])
+        p_cats = st.multiselect(
+            "Kinds of tip", insights.CATEGORIES,
+            default=PREFS.get("banner_categories", insights.CATEGORIES),
+            format_func=lambda c: {
+                "risk": "risk — concentration, unprotected losses",
+                "money": "money — where gains and losses actually sit",
+                "tax": "tax — long-term dates, advance-tax instalments",
+                "hygiene": "hygiene — missing data, rules gone quiet",
+                "ipo": "ipo — how the flip rules work",
+                "habit": "habit — overdue reminders and reviews"}[c])
+
+        st.markdown("**📬 Mails**")
+        p_digest = st.checkbox(
+            "Put the top tip in the daily digest", value=PREFS["digest_tips"],
+            help="Adds one 'worth knowing' line to the after-close mail.")
+
+        st.markdown("**📖 Reading help**")
+        p_explain = st.checkbox(
+            "Show the 'how to read this' captions", value=PREFS["explainers"],
+            help="The long grey paragraphs under each table. Useful at first, "
+                 "clutter once you know the app.")
+
+        if st.form_submit_button("Save settings", type="primary"):
+            settings.save({"banner": p_banner, "banner_tips": p_count,
+                           "banner_categories": p_cats, "digest_tips": p_digest,
+                           "banner_min_urgency": p_urgency,
+                           "explainers": p_explain})
+            auto_sync()
+            st.toast("Settings saved")
+            st.rerun()
+
+    with st.expander("🔍 Everything the app has noticed right now"):
+        st.caption("The full list the banner picks from, most urgent first. If "
+                   "something here looks wrong, it's a bug worth telling me about "
+                   "— each line is computed, not generated.")
+        for t in _tips(clock.ist_now().strftime("%Y%m%d%H") +
+                       str(clock.ist_now().minute // 15)):
+            st.markdown(f"**{t['text']}** &nbsp;`{t['category']}` "
+                        f"<span style='opacity:.55'>urgency {t['urgency']}</span>",
+                        unsafe_allow_html=True)
+            if t.get("why") or t.get("action"):
+                st.caption(" ".join(x for x in (t.get("why"), t.get("action")) if x))
