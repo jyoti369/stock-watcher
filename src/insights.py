@@ -216,6 +216,31 @@ def ltcg_countdown(holdings: list[dict], prices: dict,
     return out
 
 
+def stale_holdings(age_days: int | None, count: int) -> list[dict]:
+    """Nothing tells this app when you sell, so the list only stays true if you
+    keep it true. Urgency climbs with the age, because every number on every
+    screen is derived from it."""
+    if not count:
+        return []
+    if age_days is None:
+        # pinned (70+): an unconfirmed list makes every total, every P&L and
+        # every tip derived from them wrong by whatever you've sold
+        return [tip("holdings_unknown", "hygiene", 74,
+                    f"Your {count} holdings have never been confirmed as current.",
+                    "No broker feed is connected, so anything you've sold is "
+                    "still counted here — which makes the totals, the P&L and "
+                    "every tip above them wrong by that much.",
+                    "Portfolio tab → tick off what you've sold, then press "
+                    "“These are current”.")]
+    if age_days < 10:
+        return []
+    return [tip("holdings_stale", "hygiene", min(50 + age_days, 75),
+                f"You last confirmed your holdings {age_days} days ago.",
+                "Sales don't reach this app on their own, so a stock you've "
+                "closed keeps being counted at today's price.",
+                "Portfolio tab → clear anything sold and confirm the list.")]
+
+
 def missing_buy_dates(holdings: list[dict]) -> list[dict]:
     n = sum(1 for h in holdings or [] if not h.get("buy_date"))
     if not n:
@@ -394,7 +419,8 @@ def house_notes() -> list[dict]:
 
 def collect(*, positions=None, tail=None, totals=None, holdings=None, prices=None,
             ratings=None, advice_rows=None, rules=None, history=None,
-            reminders_rows=None, mf_rows=None, today=None) -> list[dict]:
+            reminders_rows=None, mf_rows=None, today=None,
+            holdings_age=None) -> list[dict]:
     """Every tip that currently applies, most urgent first."""
     positions = positions or []
     totals = totals or {}
@@ -406,6 +432,7 @@ def collect(*, positions=None, tail=None, totals=None, holdings=None, prices=Non
     tips += loss_is_concentrated(positions, totals)
     tips += suspect_cost_basis(positions)
     tips += attention_tail(positions, tail)
+    tips += stale_holdings(holdings_age, len(holdings or []))
     tips += ltcg_countdown(holdings or [], prices or {}, today)
     tips += missing_buy_dates(holdings or [])
     tips += advance_tax(today)

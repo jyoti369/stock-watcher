@@ -622,7 +622,7 @@ def _tips(bucket: str) -> list[dict]:
         holdings=holdings, prices=prices, ratings=ratings,
         advice_rows=advice.load_advice() or [], rules=db.get_rules(active_only=False),
         history=db.get_alert_history(limit=100), reminders_rows=reminders.load() or [],
-        mf_rows=mf.load_mf() or [])
+        mf_rows=mf.load_mf() or [], holdings_age=settings.holdings_age())
 
 
 if PREFS.get("banner", True):
@@ -721,6 +721,7 @@ with tabs[1]:
             if st.form_submit_button("Add holding") and h_sym and h_qty > 0 and h_price > 0:
                 db.add_holding(h_sym, h_exch, h_qty, h_price,
                                h_date.isoformat() if h_date else None)
+                settings.touch_holdings()
                 auto_sync()
                 st.toast(f"Added {h_qty:g} × {h_sym} @ ₹{h_price:g}")
                 st.rerun()
@@ -790,6 +791,7 @@ with tabs[1]:
                         if r.get("symbol") and (r.get("qty") or 0) > 0 and (r.get("buy_price") or 0) > 0]
                 n = db.replace_holdings(good)
                 del st.session_state["import_preview"]
+                settings.touch_holdings()      # this list is current as of today
                 auto_sync()
                 st.toast(f"Imported {n} holdings")
                 st.rerun()
@@ -803,6 +805,49 @@ with tabs[1]:
                 "one manually — then this page shows your live P&L, today's move, and "
                 "each stock's health at a glance.")
     else:
+        # Freshness first. No broker feed is connected, so a sold stock keeps
+        # being counted until it's cleared here — and then every total on every
+        # screen is wrong by that much. Say how old the list is, and make
+        # clearing sold names a two-tap job instead of 22 separate buttons.
+        _age = settings.holdings_age()
+        _asof = PREFS.get("holdings_as_of")
+        if _age is None:
+            st.warning("These holdings have **never been confirmed as current**. "
+                       "Nothing tells this app when you sell, so clear anything "
+                       "you've closed and press *These are current*.")
+        elif _age >= 10:
+            st.warning(f"Last confirmed **{_age} days ago** "
+                       f"({advice.pretty_date(_asof)}). Sold anything since?")
+        else:
+            st.caption(f"✅ Holdings confirmed current on "
+                       f"{advice.pretty_date(_asof)} "
+                       f"({'today' if _age == 0 else f'{_age} days ago'}).")
+
+        with st.expander("💸 Sold something? Clear it here", expanded=_age is None):
+            _syms = sorted({h["symbol"] for h in db.get_holdings()})
+            sold = st.multiselect("Pick everything you no longer hold", _syms,
+                                  key="sold_pick",
+                                  help="Removes every lot of those symbols. "
+                                       "Partial sale? Edit the quantity in "
+                                       "Manage holdings instead.")
+            sc1, sc2 = st.columns([1, 1])
+            if sc1.button(f"🗑 Remove {len(sold)} sold", key="sold_go",
+                          disabled=not sold, type="primary"):
+                with st.spinner("Removing…"):
+                    for h in db.get_holdings():
+                        if h["symbol"] in sold:
+                            db.remove_holding(h["id"])
+                    settings.touch_holdings()
+                    auto_sync()
+                st.toast(f"Removed {', '.join(sold)}")
+                st.rerun()
+            if sc2.button("✅ These are current", key="hold_ok",
+                          help="Nothing to change — just stamp today's date so "
+                               "the app stops warning you."):
+                settings.touch_holdings()
+                auto_sync()
+                st.toast("Marked as current")
+                st.rerun()
         lot_rows, rows = [], []
         _pf_ph = st.empty()
         _pf_ph.markdown(skeleton(min(len(holdings), 8)), unsafe_allow_html=True)
@@ -862,6 +907,7 @@ with tabs[1]:
                 c1.write(f"{h['qty']:g} × **{h['symbol']}** @ {inr(h['buy_price'])}{bd}")
                 if c2.button("Remove", key=f"rmh_{h['id']}"):
                     db.remove_holding(h["id"])
+                    settings.touch_holdings()
                     auto_sync()
                     st.rerun()
 

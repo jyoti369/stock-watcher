@@ -180,6 +180,26 @@ def _weak_note(symbol: str, watch: dict) -> str:
         if _rating(symbol, watch) == "Weak" else ""
 
 
+def holdings_caveat(count: int, today: date | None = None) -> str:
+    """One line owning up to how old the holdings list is.
+
+    Every figure above it is computed from that list, and nothing tells this app
+    when a stock is sold — so a stale list quietly inflates the total. Better to
+    say it than to present the number as fact.
+    """
+    if not count:
+        return ""
+    age = settings.holdings_age(today)
+    if age is None:
+        return ("These figures assume the imported holdings are still yours — "
+                "that has never been confirmed, so anything sold is still "
+                "counted. Confirm the list in the app's Portfolio tab.")
+    if age >= 10:
+        return (f"These figures assume the holdings list you last confirmed "
+                f"{age} days ago. Sold anything since? It's still being counted.")
+    return ""
+
+
 def portfolio_block(totals: dict) -> list[str]:
     """The top-of-mail money summary, in rupees before percentages."""
     if not totals or not totals.get("invested"):
@@ -325,6 +345,7 @@ def worth_knowing(report: dict, today: date, limit: int = 1) -> list[dict]:
             totals=report["totals"], holdings=db.get_holdings(),
             prices={p["symbol"]: p.get("price") for p in every},
             ratings={p["symbol"]: p.get("rating") for p in report["positions"]},
+            holdings_age=settings.holdings_age(today),
             advice_rows=advice.load_advice() or [],
             rules=db.get_rules(active_only=False),
             history=db.get_alert_history(limit=100),
@@ -375,10 +396,13 @@ def send_daily() -> list[str]:
                 f"<i>{tg.esc(head.split(' — ')[-1])}</i>"]
     tg_keys: list[tuple[str, str]] = []
 
+    caveat = holdings_caveat(len(report["positions"]) + len(
+        (report.get("tail") or {}).get("rows", [])), today)
     block = portfolio_block(totals)
     if block:
-        parts.append("\n".join(block))
-    html_blocks.append(mailhtml.money_card(totals, fmt))
+        parts.append("\n".join(block) + (f"\n⚠️ {caveat}" if caveat else ""))
+    html_blocks.append(mailhtml.money_card(totals, fmt)
+                       + (mailhtml.note("⚠️ " + caveat) if caveat else ""))
     if totals.get("invested"):
         tg_parts.append(
             f"{tg.b('Worth ' + fmt.inr(totals['value']))}  "
@@ -388,7 +412,8 @@ def send_daily() -> list[str]:
             f"({tg.esc(fmt.pct(totals.get('day_pct')))})\n"
             f"Overall {fmt.money_dot(totals.get('pnl'))} "
             f"{tg.esc(fmt.signed_inr(totals.get('pnl')))} "
-            f"({tg.esc(fmt.pct(totals.get('pnl_pct')))})")
+            f"({tg.esc(fmt.pct(totals.get('pnl_pct')))})"
+            + (f"\n<i>⚠️ {tg.esc(caveat)}</i>" if caveat else ""))
     stock_lines = text_stock_lines(report)
     if stock_lines:
         parts.append("📋 Stock by stock (each number is coloured for itself: "

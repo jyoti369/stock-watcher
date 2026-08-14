@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from . import clock
 from .repo_state import STATE_DIR
 
 SETTINGS_JSON = STATE_DIR / "settings.json"
@@ -30,6 +31,11 @@ DEFAULTS: dict = {
     # base URL of the hosted app, used for the "mark done" links in the mails
     "app_url": "https://stock-watcher-zddsancprsyurdcql5zqis.streamlit.app",
     "mail_actions": True,           # put those tap-to-act links in the mails
+    # The day you last told the app your holdings are correct. Nothing else can
+    # know this: no broker feed is wired up, so a stock you sold keeps showing
+    # until you say otherwise. The DB's own added_at is no use — it records when
+    # the row was rebuilt from committed state, which happens on every deploy.
+    "holdings_as_of": "",
 }
 
 SORTS = {"value": "biggest holding first",
@@ -50,6 +56,24 @@ def load() -> dict:
 
 def get(key: str):
     return load().get(key, DEFAULTS.get(key))
+
+
+def touch_holdings() -> None:
+    """Record that the holdings list is correct as of today. Called whenever you
+    import, add, remove or confirm one."""
+    save({**load(), "holdings_as_of": clock.ist_today().isoformat()})
+
+
+def holdings_age(today=None) -> int | None:
+    """Days since the holdings were last confirmed, or None if never."""
+    raw = load().get("holdings_as_of")
+    if not raw:
+        return None
+    try:
+        from datetime import date
+        return ((today or clock.ist_today()) - date.fromisoformat(str(raw)[:10])).days
+    except (ValueError, TypeError):
+        return None
 
 
 def save(values: dict) -> bool:

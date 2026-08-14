@@ -809,6 +809,34 @@ def test_insight_choice_is_stable_and_respects_settings():
     assert insights.choose([], n=2) == []
 
 
+def test_holdings_freshness(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from src import clock, insights, settings
+
+    monkeypatch.setattr(settings, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(settings, "SETTINGS_JSON", tmp_path / "settings.json")
+    today = clock.ist_today()
+
+    assert settings.holdings_age() is None            # never confirmed
+    settings.touch_holdings()
+    assert settings.holdings_age() == 0
+    settings.save({**settings.load(),
+                   "holdings_as_of": (today - timedelta(days=17)).isoformat()})
+    assert settings.holdings_age(today) == 17
+    settings.save({**settings.load(), "holdings_as_of": "not-a-date"})
+    assert settings.holdings_age() is None            # garbage can't crash it
+
+    # an unconfirmed list is the loudest of the housekeeping tips, because every
+    # total is derived from it
+    never = insights.stale_holdings(None, 22)
+    assert never and never[0]["urgency"] >= 60
+    assert "never been confirmed" in never[0]["text"]
+    assert insights.stale_holdings(3, 22) == []        # recently confirmed, quiet
+    old = insights.stale_holdings(17, 22)
+    assert old and "17 days ago" in old[0]["text"]
+    assert insights.stale_holdings(None, 0) == []      # nothing held, nothing to say
+
+
 def test_settings_roundtrip_and_defaults(tmp_path, monkeypatch):
     from src import settings
 
