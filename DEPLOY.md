@@ -1,4 +1,4 @@
-# Deploying Stock Watcher
+# Deploying Jarvis
 
 Your setup: **alerts run 24/7 on GitHub Actions** (no machine of yours stays on,
 no card), and you **run the dashboard locally** when you want to browse or change

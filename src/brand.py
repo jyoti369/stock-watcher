@@ -2,21 +2,20 @@
 
 It started as a stock watcher and is now closer to a personal assistant — it
 holds the portfolio, the money plan, the IPO screener, the advice ledger,
-reminders and the shopping tracker, and mails you the parts that need a
-decision. "Stock Watcher" undersold that.
+reminders and the shopping tracker, notices things across all of them, and
+mails you the parts that need a decision. "Stock Watcher" undersold that.
 
-The name comes from the Telegram bot already carrying it (@niki25_bot), so the
-app and the thing that pings your phone are finally the same character. All of
-it lives here: change NAME and every screen, subject line and mail header
-follows.
+Named for the obvious model: an assistant that keeps the books, watches the
+feeds, and says the useful thing without being asked. Every screen, subject
+line and mail header reads from here, so renaming is one edit.
 """
 
-NAME = "Niki"
-TAGLINE = "your money, your holdings, your buying decisions"
+NAME = "Jarvis"
+TAGLINE = "money, holdings and buying decisions — at your service"
 
 # what shows in the browser tab / phone home screen
 PAGE_TITLE = NAME
-ICON = "🪄"
+ICON = "🤖"
 
 # mail subject prefixes — kept short so a phone shows the useful half
 DIGEST_SUBJECT = f"📊 {NAME}"

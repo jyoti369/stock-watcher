@@ -1,7 +1,11 @@
-# Stock Watcher
+# Jarvis
 
-A personal watcher + analysis dashboard for Indian equities (NSE / BSE), built on
-free data. Three things in one small codebase:
+A personal money assistant for one person: Indian equities (NSE / BSE), the
+portfolio behind them, the IPO screener, the money plan, reminders and even the
+shopping decisions — all on free data. It notices things across those and mails
+the parts that need a decision.
+
+Three things in one small codebase:
 
 1. **Dashboard** — one screen for your watchlist: live prices, 10-year price
    history with moving averages, trailing returns, and a fundamental scorecard.
