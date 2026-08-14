@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 from . import db
-from .config import ROOT
+from .config import DB_PATH, ROOT
 
 STATE_DIR = ROOT / "state"
 WATCHLIST_JSON = STATE_DIR / "watchlist.json"
@@ -32,6 +32,24 @@ ALERTS_LOG_JSON = STATE_DIR / "alerts_log.json"
 def _write(path: Path, data) -> None:
     STATE_DIR.mkdir(exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def repo_newer_than_db() -> bool:
+    """True when the committed state was written after this machine's DB last
+    changed — meaning the other copy of the app (phone/cloud) edited it since.
+
+    Exporting on top of that would silently drop whatever it added: a holding
+    entered on the phone vanished from a laptop save exactly this way. So the
+    local app re-imports first when it sees this.
+    """
+    try:
+        db_at = DB_PATH.stat().st_mtime
+    except OSError:
+        return WATCHLIST_JSON.exists()
+    newest = max((p.stat().st_mtime for p in (WATCHLIST_JSON, RULES_JSON,
+                                             HOLDINGS_JSON) if p.exists()),
+                 default=0.0)
+    return newest > db_at + 1        # a second of slack for same-write jitter
 
 
 def _read(path: Path, default):
@@ -151,7 +169,8 @@ def import_from_repo() -> None:
         conn.execute("DELETE FROM holdings")
 
     for w in _read_maybe_enc(WATCHLIST_JSON, []):
-        db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"))
+        db.add_to_watchlist(w["symbol"], w.get("exchange", "NSE"), w.get("name"),
+                            w.get("added_at"))
 
     for h in (_read_holdings_raw() or []):             # [] if encrypted and no key (e.g. the Action)
         db.add_holding(h["symbol"], h.get("exchange", "NSE"),
@@ -159,10 +178,13 @@ def import_from_repo() -> None:
 
     saved = _read(ALERT_STATE_JSON, {})
     for r in _read_maybe_enc(RULES_JSON, []):
-        if not r.get("active", 1):
-            continue
         rid = db.add_rule(r["symbol"], r.get("exchange", "NSE"),
                           r.get("label") or "alert", r["conditions"], mode=r.get("mode", "level"))
+        # paused rules are imported too, just inactive: the watcher only reads
+        # active ones, and dropping them here used to delete a pause on the next
+        # export — the rule would quietly come back to life
+        if not r.get("active", 1):
+            db.set_rule_active(rid, False)
         st = saved.get(rule_key(r))
         if isinstance(st, str):                      # legacy format: bare timestamp
             db.set_last_triggered(rid, st)
@@ -171,6 +193,8 @@ def import_from_repo() -> None:
                 db.set_last_triggered(rid, st["triggered"])
             if st.get("state") is not None:
                 db.set_last_state(rid, bool(st["state"]))
+            if st.get("true_since"):
+                db.set_true_since(rid, st["true_since"])
 
 
 # ---- called by the ACTION after the watcher runs -------------------------
@@ -178,8 +202,12 @@ def import_from_repo() -> None:
 def export_state() -> None:
     """Persist cooldown timestamps + append the fired log for the next run."""
     rules = db.get_rules(active_only=False)
+    # true_since rides along: the Action rebuilds the DB from scratch every run,
+    # so without it a week-old condition would introduce itself as brand new
     _write(ALERT_STATE_JSON, {
-        rule_key(r): {"triggered": r.get("last_triggered"), "state": r.get("last_state")}
+        rule_key(r): {"triggered": r.get("last_triggered"),
+                      "state": r.get("last_state"),
+                      "true_since": r.get("true_since")}
         for r in rules if r.get("last_triggered") or r.get("last_state") is not None
     })
 

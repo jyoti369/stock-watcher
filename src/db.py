@@ -91,15 +91,22 @@ def init_db() -> None:
             conn.execute("ALTER TABLE alert_rules ADD COLUMN mode TEXT NOT NULL DEFAULT 'level'")
         if "last_state" not in cols:
             conn.execute("ALTER TABLE alert_rules ADD COLUMN last_state INTEGER")
+        # when a "while it lasts" condition first turned true — lets an alert say
+        # "3rd day running" instead of looking like a fresh event every time
+        if "true_since" not in cols:
+            conn.execute("ALTER TABLE alert_rules ADD COLUMN true_since TEXT")
 
 
 # ---- watchlist -----------------------------------------------------------
 
-def add_to_watchlist(symbol: str, exchange: str = "NSE", name: str | None = None) -> None:
+def add_to_watchlist(symbol: str, exchange: str = "NSE", name: str | None = None,
+                     added_at: str | None = None) -> None:
+    """added_at is passed when re-seeding from committed state, so a rebuild
+    doesn't restamp every row and show up as a diff that changes nothing."""
     with connect() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO watchlist(symbol, exchange, name, added_at) VALUES (?,?,?,?)",
-            (symbol.upper(), exchange.upper(), name, now_iso()),
+            (symbol.upper(), exchange.upper(), name, added_at or now_iso()),
         )
 
 
@@ -172,6 +179,11 @@ def mark_triggered(rule_id: int) -> None:
 def set_last_state(rule_id: int, state: bool) -> None:
     with connect() as conn:
         conn.execute("UPDATE alert_rules SET last_state=? WHERE id=?", (1 if state else 0, rule_id))
+
+
+def set_true_since(rule_id: int, iso_date: str | None) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE alert_rules SET true_since=? WHERE id=?", (iso_date, rule_id))
 
 
 def set_last_triggered(rule_id: int, iso: str) -> None:

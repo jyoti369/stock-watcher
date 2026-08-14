@@ -3,6 +3,7 @@ gracefully — if a channel isn't configured it's skipped, not fatal.
 """
 from __future__ import annotations
 
+import html
 import smtplib
 from email.mime.text import MIMEText
 
@@ -23,8 +24,12 @@ def send_telegram(text: str) -> bool:
                   "disable_web_page_preview": True},
             timeout=15,
         )
+        if not r.ok:
+            # printed, not swallowed: a rejected message used to vanish silently
+            print(f"[telegram] {r.status_code}: {r.text[:200]}")
         return r.ok
-    except Exception:
+    except Exception as e:
+        print(f"[telegram] send failed: {str(e)[:200]}")
         return False
 
 
@@ -42,7 +47,8 @@ def send_email(subject: str, body: str) -> bool:
             s.login(em["username"], em["password"])
             s.send_message(msg)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[email] send failed: {str(e)[:200]}")
         return False
 
 
@@ -51,7 +57,11 @@ def dispatch(subject: str, body: str, channels: list[str] | None = None) -> list
     channels that actually succeeded."""
     channels = channels or CONFIG["alerts"]["channels"]
     sent = []
-    if "telegram" in channels and send_telegram(f"<b>{subject}</b>\n{body}"):
+    # Telegram parses the message as HTML, so anything in the text that looks
+    # like markup has to be escaped first — an unescaped "&" in a company name
+    # ("Q&T Foods") is enough for Telegram to reject the whole message.
+    if "telegram" in channels and send_telegram(
+            f"<b>{html.escape(subject)}</b>\n{html.escape(body)}"):
         sent.append("telegram")
     if "email" in channels and send_email(subject, body):
         sent.append("email")

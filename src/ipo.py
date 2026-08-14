@@ -27,6 +27,8 @@ from datetime import date, datetime
 
 import requests
 
+from . import clock
+
 GMP_URL = "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/"
 SUB_URL = "https://ipowatch.in/ipo-subscription-status-today/"
 # investorgain live subscription report (id 333) — the same JSON their site's
@@ -205,12 +207,12 @@ def screen() -> list[dict]:
     """Open IPOs (close date today or later) with a house-rules verdict each.
     investorgain first (live, one call); on failure, join ipowatch's GMP +
     subscription pages by name — that source runs about a day behind."""
-    today = date.today()
+    today = clock.ist_today()
     merged = []
     for r in fetch_investorgain():
         closes = r.pop("_closes", None)
         if closes and closes >= today:
-            merged.append(r)
+            merged.append({**r, "closes": closes})
     source = "investorgain.com (live)"
     if not merged:
         source = "ipowatch.in (can lag a day)"
@@ -221,7 +223,8 @@ def screen() -> list[dict]:
                 continue
             g = gmp.get(_norm(s["name"]), {})
             merged.append({**s, "gmp": g.get("gmp"), "price": g.get("price"),
-                           "gmp_pct": g.get("gmp_pct"), "updated": ""})
+                           "gmp_pct": g.get("gmp_pct"), "updated": "",
+                           "closes": closes})
     for row in merged:
         row["source"] = source
         row["verdict"], row["why"] = verdict(row)
@@ -262,19 +265,81 @@ def verdict(row: dict) -> tuple[str, str]:
     return "SKIP", "; ".join(misses)
 
 
-def digest_lines(max_rows: int = 6) -> list[str]:
-    """Short lines for the morning Telegram brief. [] if nothing is open."""
+def close_day(row: dict, today: date | None = None) -> str:
+    """The last day in words: 'today', 'Mon 17 Aug (in 3 days)', or whatever
+    the source gave us if the date wouldn't parse."""
+    closes = row.get("closes")
+    if not isinstance(closes, date):
+        return str(row.get("close") or "an unknown date")
+    today = today or clock.ist_today()
+    return "today" if closes == today else clock.when(closes, today)
+
+
+def closing_phrase(row: dict, today: date | None = None) -> str:
+    """'closes today — last day to apply' / 'closes Mon 17 Aug (in 3 days)'."""
+    day = close_day(row, today)
+    return ("closes today — last day to apply" if day == "today"
+            else f"closes {day}")
+
+
+def numbers_phrase(row: dict) -> str:
+    """'GMP 36.1% (₹180 over ₹499) · book 26.9x · big money (QIB) 12.5x'."""
+    pct = f"{row['gmp_pct']:g}%" if row.get("gmp_pct") is not None else "not quoted"
+    bits = [f"grey-market premium {pct}"]
+    if row.get("gmp") and row.get("price"):
+        bits[0] += f" (₹{row['gmp']:g} over the ₹{row['price']:g} price)"
+    bits.append(f"book {row['total']:g}x subscribed" if row.get("total") is not None
+                else "book not reported yet")
+    if row.get("qib") is not None:
+        bits.append(f"big money (QIB) {row['qib']:g}x")
+    return " · ".join(bits)
+
+
+def brief(today: date | None = None) -> dict:
+    """The IPO section of the midday mail, grouped by what you'd actually do.
+
+    Returns {act, watch, skip, footer, todo}: `act` are the ones passing every
+    bar, `watch` the ones whose premium qualifies but whose book is still
+    filling, `skip` a single line naming the rest (a six-row table where five
+    rows say SKIP buries the one that matters), and `todo` the short imperative
+    for anything whose last day is today.
+    """
     rows = screen()
-    out = []
-    for r in rows[:max_rows]:
-        kind = "SME" if r.get("sme") else "MB"
-        pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"
-        tot = f"{r['total']:g}x" if r.get("total") is not None else "?"
-        qib = f"{r['qib']:g}x" if r.get("qib") is not None else "?"
-        out.append(f"[{r['verdict']}] {r['name']} ({kind}) — GMP {pct}, "
-                   f"sub {tot}, QIB {qib}, closes {r.get('close') or '?'}")
-    if rows:
-        upd = next((r["updated"] for r in rows if r.get("updated")), "")
-        out.append(f"(numbers from {rows[0].get('source', '?')}"
-                   + (f", as of {upd}" if upd else "") + ")")
-    return out
+    if not rows:
+        return {"act": [], "watch": [], "skip": None, "footer": "", "todo": []}
+    today = today or clock.ist_today()
+    act, watch, skipped, todo = [], [], [], []
+    for r in rows:
+        kind = "SME" if r.get("sme") else "mainboard"
+        head = f"{r['name']} ({kind})"
+        if r["verdict"] == "APPLY-ZONE":
+            act.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}")
+            if r.get("closes") == today:
+                todo.append(f"Apply for {r['name']} ({kind} IPO) — today is the "
+                            f"last day, bids close at 4 pm. {numbers_phrase(r)}."
+                            f" One lot, one PAN.")
+        elif r["verdict"] == "WATCH":
+            watch.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}"
+                         f"\n  {r['why']}")
+            if r.get("closes") == today:
+                bar = RULES["sme" if r.get("sme") else "mainboard"]
+                todo.append(f"Decide on {r['name']} ({kind} IPO) today — bids "
+                            f"close at 4 pm. The premium clears the bar but "
+                            f"{numbers_phrase(r)}. Apply only if the book "
+                            f"crosses {bar['total']:g}x with QIB over "
+                            f"{bar['qib']:g}x.")
+        else:
+            pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "no GMP"
+            skipped.append(f"{r['name']} ({pct})")
+    upd = next((r["updated"] for r in rows if r.get("updated")), "")
+    footer = ("Numbers from " + str(rows[0].get("source", "?"))
+              + (f", as of {upd}" if upd else "")
+              + ". Bars: mainboard needs 20% premium, 15x book, QIB 5x · "
+                "SME needs 35%, 25x, QIB 2x.")
+    skip = None
+    if skipped:
+        skip = (f"Not worth it today ({len(skipped)}): "
+                + ", ".join(skipped[:6])
+                + (f" and {len(skipped) - 6} more" if len(skipped) > 6 else ""))
+    return {"act": act, "watch": watch, "skip": skip, "footer": footer,
+            "todo": todo}

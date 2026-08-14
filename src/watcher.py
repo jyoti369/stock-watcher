@@ -10,9 +10,9 @@ dropdown instead of making you memorise names.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from . import alerts, analysis, datasource, db
+from . import alerts, analysis, clock, datasource, db, fmt, portfolio
 from .config import CONFIG
 
 # metric key -> human label, used by the dashboard rule builder and the checker
@@ -42,6 +42,59 @@ OPS = {
     ">=": lambda a, b: a >= b,
     "==": lambda a, b: a == b,
 }
+
+# metric key -> (what it is in plain words, how to print a value of it).
+# The alert mail reads as a sentence, so "gap to the 200-day average price is
+# -11.2%, below your -10% line" instead of "price_vs_ma200: -11.2 < -10".
+_PLAIN: dict[str, tuple[str, str]] = {
+    "price": ("the price", "₹{v:,.0f}"),
+    "pct_change_day": ("today's move", "{v:+.1f}%"),
+    "ret_1w": ("the last week's return", "{v:+.1f}%"),
+    "ret_1m": ("the last month's return", "{v:+.1f}%"),
+    "ret_3m": ("the last three months' return", "{v:+.1f}%"),
+    "ret_1y": ("the last year's return", "{v:+.1f}%"),
+    "rsi14": ("its RSI", "{v:.0f}"),
+    "price_vs_ma50": ("the gap between price and its 50-day average", "{v:+.1f}%"),
+    "price_vs_ma200": ("the gap between price and its 200-day average", "{v:+.1f}%"),
+    "pos_in_52w_range": ("its place in the 1-year range", "{v:.0f}"),
+    "off_52w_high": ("how far it is below its 1-year high", "{v:.1f}%"),
+    "pe": ("its P/E", "{v:.1f}"),
+    "pb": ("its price-to-book", "{v:.1f}"),
+    "roe": ("its return on equity", "{v:.1f}%"),
+    "debt_to_equity": ("its debt against equity", "{v:.2f}x"),
+    "dividend_yield": ("its dividend yield", "{v:.2f}%"),
+}
+_SIDE = {"<": "under", "<=": "under", ">": "over", ">=": "over", "==": "exactly"}
+
+# jargon that needs one line of explaining, added under the alert that used it
+_GLOSS = {
+    "rsi14": "RSI is a 0-100 momentum gauge: under 30 means heavily sold off, "
+             "over 70 means heavily bought.",
+    "pos_in_52w_range": "0 means it's at its 1-year low, 100 at its 1-year high.",
+    "pe": "P/E is the price divided by a year's profit per share — how many "
+          "years of current profit you're paying for.",
+    "pb": "Price-to-book compares the price against the company's net assets.",
+    "debt_to_equity": "Debt against equity: over 1x means it owes more than "
+                      "the owners have put in.",
+}
+
+
+def plain_reason(metric: str, actual: float, op: str, target: float) -> str:
+    """One condition as a readable clause."""
+    label, spec = _PLAIN.get(metric, (METRICS.get(metric, metric), "{v:g}"))
+    return (f"{label} is {spec.format(v=actual)} — "
+            f"{_SIDE.get(op, op)} your {spec.format(v=float(target))} line")
+
+
+def plain_condition(cond: dict) -> str:
+    """The same clause with no live value yet — for listing a rule in the app."""
+    metric = cond.get("metric")
+    label, spec = _PLAIN.get(metric, (METRICS.get(metric, metric), "{v:g}"))
+    try:
+        target = spec.format(v=float(cond.get("value")))
+    except (TypeError, ValueError):
+        target = str(cond.get("value"))
+    return f"{label} goes {_SIDE.get(cond.get('op'), str(cond.get('op')))} {target}"
 
 
 def gather_values(symbol: str, exchange: str = "NSE") -> dict[str, float | None]:
@@ -104,8 +157,67 @@ def evaluate_rule(rule: dict, values: dict) -> tuple[bool, list[str], bool]:
             return False, [], False        # can't determine — data gap
         if not fn(actual, float(target)):
             return False, [], True         # evaluable, condition simply not met
-        reasons.append(f"{METRICS.get(metric, metric)}: {actual} {op} {target}")
+        reasons.append(plain_reason(metric, actual, op, float(target)))
     return True, reasons, True
+
+
+def _fired_today(last_triggered: str | None) -> bool:
+    ist = clock.to_ist(last_triggered) if last_triggered else None
+    return bool(ist and ist.date() == clock.ist_today())
+
+
+def _holding_note(symbol: str, price: float | None) -> str:
+    """'You hold 25 shares at ₹1,320 average — that's -₹3,775 (-11.4%) today.'
+    Empty when you don't own it or there's no live price."""
+    lots = [h for h in db.get_holdings() if h["symbol"] == symbol.upper()]
+    if not lots or price is None:
+        return ""
+    pos = portfolio.by_symbol([portfolio.lot_row(h, {"price": price}) for h in lots])
+    if not pos:
+        return ""
+    p = pos[0]
+    unit = "share" if p["qty"] == 1 else "shares"
+    return (f"You hold {p['qty']:g} {unit} at {fmt.inr(p['buy_price'])} average — "
+            f"that position is {fmt.signed_inr(p['pnl'])} "
+            f"({fmt.pct(p['pnl_pct'])}) at this price.")
+
+
+def alert_body(rule: dict, values: dict, reasons: list[str],
+               true_since: date | None = None) -> str:
+    """The alert mail, dated and self-explaining: what matched, what you own,
+    and why it may keep arriving."""
+    price, day = values.get("price"), values.get("pct_change_day")
+    head = f"{rule['symbol']} ({rule['exchange']})"
+    if price is not None:
+        head += f" — {fmt.inr(price)}"
+        if isinstance(day, (int, float)):
+            head += f", {fmt.move(day)} today"
+    out = [clock.stamp(), "", head,
+           f'Your alert "{rule.get("label") or "alert"}" just matched:']
+    out += [f"• {r}" for r in reasons]
+    gloss = [_GLOSS[c["metric"]] for c in rule.get("conditions", [])
+             if c.get("metric") in _GLOSS]
+    if gloss:
+        out += ["(" + " ".join(dict.fromkeys(gloss)) + ")"]
+    note = _holding_note(rule["symbol"], price)
+    if note:
+        out += ["", note]
+    if rule.get("mode", "level") == "level":
+        since = ""
+        if true_since:
+            days = (clock.ist_today() - true_since).days + 1
+            since = (" It turned true today." if days <= 1 else
+                     f" It has been true since {clock.short(true_since)}"
+                     f" — {days} days running.")
+        out += ["", "This is a standing rule: it stays true while the condition "
+                "holds, so you'll get at most one of these a day until it "
+                "clears." + since + " Pause it in the app's Alerts tab if it "
+                "isn't telling you anything new."]
+    else:
+        out += ["", "This is a one-off crossing alert — it won't repeat until "
+                "the level is crossed again."]
+    out += ["", "(your own rule fired this, it isn't advice — check before acting)"]
+    return "\n".join(out)
 
 
 def run_once(verbose: bool = True) -> list[dict]:
@@ -131,9 +243,30 @@ def run_once(verbose: bool = True) -> list[dict]:
         was_true = rule.get("last_state") == 1
         db.set_last_state(rule["id"], fired_now)     # record every evaluable run
 
+        # remember when a standing condition first turned true, and forget it the
+        # moment it clears — that's what lets the mail say "3rd day running"
+        today = clock.ist_today()
+        true_since = None
+        if fired_now:
+            try:
+                true_since = date.fromisoformat(str(rule.get("true_since"))[:10])
+            except ValueError:
+                true_since = today
+            if not was_true or rule.get("true_since") is None:
+                true_since = today
+                db.set_true_since(rule["id"], today.isoformat())
+        elif rule.get("true_since"):
+            db.set_true_since(rule["id"], None)
+
         should_fire = fired_now
         if mode == "edge" and was_true:
             should_fire = False                       # already true last time — wait for a re-cross
+        # a level rule can sit true for weeks; one mail a day is a reminder,
+        # every cooldown window is spam
+        if should_fire and mode == "level" and _fired_today(rule.get("last_triggered")):
+            if verbose:
+                print(f"[daily-cap] {rule['symbol']} rule #{rule['id']} already mailed today")
+            should_fire = False
         if should_fire and _in_cooldown(rule.get("last_triggered")):
             if verbose:
                 print(f"[cooldown] {rule['symbol']} rule #{rule['id']} would fire, suppressed")
@@ -142,10 +275,9 @@ def run_once(verbose: bool = True) -> list[dict]:
             continue
 
         label = rule.get("label") or "alert"
-        subject = f"📈 {rule['symbol']} ({rule['exchange']}): {label}"
-        body = "Triggered because:\n- " + "\n- ".join(reasons)
-        body += f"\n\nLast price: {values.get('price')}"
-        body += "\n\n(rules-based alert, not advice — verify before acting)"
+        subject = (f"🔔 {rule['symbol']} · {label} · "
+                   f"{clock.short(today)} {clock.clock_time()}")
+        body = alert_body(rule, values, reasons, true_since)
 
         channels = alerts.dispatch(subject, body)
         db.mark_triggered(rule["id"])

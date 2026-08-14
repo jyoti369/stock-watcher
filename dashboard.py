@@ -27,10 +27,10 @@ except Exception:
     pass
 
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
-                 datasource, db, finance_plan, fundamentals, gh_sync, importer,
-                 ipo, mf, portfolio, projection, reminders, repo_state,
-                 scan_history, sectors, shop, shop_watch, suggestions,
-                 verdict, watcher)
+                 clock, datasource, db, finance_plan, fmt, fundamentals,
+                 gh_sync, importer, ipo, mf, portfolio, projection, reminders,
+                 repo_state, scan_history, sectors, shop, shop_watch,
+                 suggestions, verdict, watcher)
 from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
@@ -87,8 +87,12 @@ def _require_password() -> None:
 _require_password()
 db.init_db()
 
-# fresh cloud container has an empty db — seed watchlist/rules from committed state
-if not db.get_watchlist() and repo_state.WATCHLIST_JSON.exists():
+# fresh cloud container has an empty db — seed watchlist/rules from committed state.
+# Also re-seed when the committed state is newer than this machine's db: that means
+# the other copy of the app (phone) changed something since, and saving over it here
+# would silently drop it.
+if repo_state.WATCHLIST_JSON.exists() and (
+        not db.get_watchlist() or repo_state.repo_newer_than_db()):
     try:
         repo_state.import_from_repo()
     except Exception:
@@ -100,7 +104,13 @@ PERIODS = {"3 months": 0.25, "6 months": 0.5, "1 year": 1.0, "3 years": 3.0, "5 
 
 
 def inr(v) -> str:
-    return f"₹{v:,.0f}" if isinstance(v, (int, float)) else "—"
+    return fmt.inr(v)
+
+
+def _ist_when(ts: str) -> str:
+    """A stored UTC timestamp as India time: 'Fri 14 Aug, 3:12 pm'."""
+    d = clock.to_ist(ts)
+    return f"{clock.short(d.date())}, {clock.clock_time(d)}" if d else str(ts)[:16]
 
 
 def sync_to_github() -> tuple[bool, str]:
@@ -1284,11 +1294,13 @@ with tabs[4]:
                    "The line under each rule shows how close it is to firing right now.")
     _rule_vals: dict[str, dict] = {}
     for rule in rules:
-        cond_txt = " AND ".join(
-            f"{watcher.METRICS.get(c['metric'], c['metric'])} {c['op']} {c['value']}"
-            for c in rule["conditions"])
+        cond_txt = " and ".join(watcher.plain_condition(c) for c in rule["conditions"])
         active = bool(rule["active"])
-        mode_tag = " · ⚡ edge" if rule.get("mode") == "edge" else ""
+        mode_tag = (" · ⚡ pings once when it crosses"
+                    if rule.get("mode") == "edge"
+                    else " · 🔁 stays on while it's true (at most one mail a day)")
+        if rule.get("true_since"):
+            mode_tag += f" · true since {advice.pretty_date(rule['true_since'])}"
         status = "🟢 Active" if active else "⏸️ Paused"
 
         # near-fire preview: current value of each condition vs its target
@@ -1330,7 +1342,8 @@ with tabs[4]:
     st.markdown("**Recent alerts**")
     history = db.get_alert_history(limit=25)
     if history:
-        st.dataframe(pd.DataFrame([{"When": h["ts"][:16], "Symbol": h["symbol"],
+        # stored in UTC; shown in IST, because "09:42" on a 3:12pm alert is a lie
+        st.dataframe(pd.DataFrame([{"When": _ist_when(h["ts"]), "Symbol": h["symbol"],
                                     "Message": h["message"], "Sent to": h["channels"]}
                                    for h in history]),
                      width="stretch", hide_index=True)
@@ -1529,15 +1542,18 @@ with tabs[8]:
                        + (f" · subscription updated **{upd}**" if upd else "")
                        + " · this page re-pulls at most every 10 min")
             badge = {"APPLY-ZONE": "🟢", "WATCH": "🟡", "SKIP": "🔴", "NO DATA": "⚪"}
+            today_ist = clock.ist_today()
             for r in ipo_rows:
                 pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"
                 tot = f"{r['total']:g}x" if r.get("total") is not None else "?"
                 qib = f"{r['qib']:g}x" if r.get("qib") is not None else "?"
+                last_day = r.get("closes") == today_ist
                 st.markdown(
                     f"{badge.get(r['verdict'], '⚪')} **{r['name']}** "
                     f"({'SME' if r.get('sme') else 'Mainboard'}) — GMP {pct} · "
-                    f"total {tot} · QIB {qib}"
-                    + (f" · closes {r['close']}" if r.get("close") else ""))
+                    f"total {tot} · QIB {qib} · "
+                    + ("**⏳ last day — bids close 4 pm today**" if last_day
+                       else ipo.closing_phrase(r, today_ist)))
                 st.caption(f"{r['verdict']}: {r['why']}")
             st.caption("APPLY-ZONE = passes every bar **today** — still apply only "
                        "on the last day. WATCH = GMP qualifies but the book is "

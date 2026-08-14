@@ -53,7 +53,8 @@ def test_weak_fundamentals_score_low():
 
 def test_rule_true_false_and_gap():
     rule = {"conditions": [{"metric": "price", "op": "<", "value": 50}]}
-    assert watcher.evaluate_rule(rule, {"price": 40}) == (True, ["Last price (₹): 40 < 50"], True)
+    assert watcher.evaluate_rule(rule, {"price": 40}) == \
+        (True, ["the price is ₹40 — under your ₹50 line"], True)
     fired, _, ok = watcher.evaluate_rule(rule, {"price": 60}); assert not fired and ok
     fired, _, ok = watcher.evaluate_rule(rule, {"price": None}); assert not fired and not ok
 
@@ -565,10 +566,10 @@ def test_ipo_investorgain_parse():
 
 
 def test_heartbeat_reminder_split(monkeypatch):
-    from datetime import date, timedelta
-    from src import heartbeat, reminders
+    from datetime import timedelta
+    from src import clock, heartbeat, reminders
 
-    today = date.today()
+    today = clock.ist_today()
     rows = [
         reminders.new("pay advance tax", today.isoformat()),
         reminders.new("IPO last day: apply", (today + timedelta(days=1)).isoformat()),
@@ -577,14 +578,216 @@ def test_heartbeat_reminder_split(monkeypatch):
         reminders.new("far away", (today + timedelta(days=30)).isoformat()),
     ]
     monkeypatch.setattr(heartbeat.reminders, "load", lambda: rows)
-    now, later = heartbeat.reminder_due_lines()
-    # today + overdue land in "now"; tomorrow/this-week in "later"; far future absent
-    assert len(now) == 2 and len(later) == 2
-    assert any("pay advance tax" in ln for ln in now)
-    assert any("overdue" in ln for ln in now if "renew FD" in ln)
-    assert any("tomorrow" in ln for ln in later if "IPO last day" in ln)
-    assert any("in 4 days" in ln for ln in later if "check allotment" in ln)
-    assert not any("far away" in ln for ln in now + later)
+    b = heartbeat.reminder_buckets(today)
+    # a past date is never lumped in with today's jobs, and a future one never
+    # appears under a "today" header — that mix is what made the mail unreadable
+    assert [i["text"] for i in b["today"]] == ["pay advance tax"]
+    assert [i["text"] for i in b["overdue"]] == ["renew FD"]
+    assert [i["text"] for i in b["upcoming"]] == ["IPO last day: apply",
+                                                  "check allotment"]
+    assert "was due" in heartbeat.render_overdue(b["overdue"], today)[0]
+    assert "2 days ago" in heartbeat.render_overdue(b["overdue"], today)[0]
+    up = heartbeat.render_upcoming(b["upcoming"], today)
+    assert "(tomorrow)" in up[0] and "(in 4 days)" in up[1]
+    assert clock.short(today + timedelta(days=4)) in up[1]   # the date itself, always
+
+
+def test_heartbeat_overdue_capped(monkeypatch):
+    from datetime import timedelta
+    from src import clock, heartbeat, reminders
+
+    today = clock.ist_today()
+    rows = [reminders.new(f"old job {n}", (today - timedelta(days=n)).isoformat())
+            for n in range(1, 8)]
+    monkeypatch.setattr(heartbeat.reminders, "load", lambda: rows)
+    lines = heartbeat.render_overdue(heartbeat.reminder_buckets(today)["overdue"], today)
+    assert len(lines) == heartbeat._OVERDUE_SHOWN + 1
+    assert "and 3 more past their date" in lines[-1]
+    assert "yesterday" in lines[0]                  # newest overdue listed first
+
+
+def test_clock_ist_and_wording():
+    from datetime import date, datetime, timedelta, timezone
+    from src import clock
+
+    # a UTC evening is already the next day in India — the whole reason this exists
+    late = datetime(2026, 8, 14, 19, 30, tzinfo=timezone.utc)
+    assert late.astimezone(clock.IST).date() == date(2026, 8, 15)
+    assert clock.to_ist("2026-08-14T09:42:00+00:00").hour == 15
+    assert clock.clock_time(datetime(2026, 8, 14, 15, 45, tzinfo=clock.IST)) == "3:45 pm"
+    assert clock.stamp(datetime(2026, 8, 14, 15, 45, tzinfo=clock.IST)) == \
+        "Friday, 14 August 2026 · 3:45 pm IST"
+
+    today = date(2026, 8, 14)
+    assert clock.short(today) == "Fri 14 Aug"
+    assert clock.when(today, today) == "Fri 14 Aug (today)"
+    assert clock.when(today + timedelta(days=1), today) == "Sat 15 Aug (tomorrow)"
+    assert clock.when(today + timedelta(days=3), today) == "Mon 17 Aug (in 3 days)"
+    assert clock.when(today - timedelta(days=1), today) == "Thu 13 Aug (yesterday)"
+    assert clock.when(today - timedelta(days=2), today) == "Wed 12 Aug (2 days ago)"
+
+
+def test_money_formatting():
+    from src import fmt
+
+    assert fmt.inr(412340) == "₹4,12,340"          # Indian grouping, not 412,340
+    assert fmt.inr(1234567) == "₹12,34,567"
+    assert fmt.inr(-1890) == "-₹1,890"
+    assert fmt.inr(999) == "₹999" and fmt.inr(None) == "—"
+    assert fmt.signed_inr(52400) == "+₹52,400"
+    assert fmt.pct(-0.48) == "-0.5%" and fmt.pct(14.62) == "+14.6%"
+    assert fmt.money_dot(500) == "🟢" and fmt.money_dot(-500) == "🔴"
+    assert fmt.move(-0.5).startswith("🔻")
+
+
+def test_positions_rolled_up_per_symbol():
+    from src import portfolio
+
+    lots = [
+        portfolio.lot_row({"symbol": "SUZLON", "qty": 100, "buy_price": 50},
+                          {"price": 60, "pct_change_day": 1.0}),
+        portfolio.lot_row({"symbol": "SUZLON", "qty": 100, "buy_price": 70},
+                          {"price": 60, "pct_change_day": 1.0}),
+        portfolio.lot_row({"symbol": "ITC", "qty": 10, "buy_price": 400},
+                          {"price": None, "pct_change_day": None}),
+    ]
+    pos = portfolio.by_symbol(lots)
+    suzlon = next(p for p in pos if p["symbol"] == "SUZLON")
+    assert suzlon["qty"] == 200 and suzlon["buy_price"] == 60.0   # weighted average
+    assert suzlon["value"] == 12000 and suzlon["pnl"] == 0
+    itc = next(p for p in pos if p["symbol"] == "ITC")
+    assert itc["value"] is None and itc["pnl"] is None   # unpriced, not zero
+    assert pos[0]["symbol"] == "SUZLON"                  # biggest first
+
+
+def test_portfolio_block_wording():
+    from src import heartbeat
+
+    out = heartbeat.portfolio_block({"invested": 149244, "value": 132168,
+                                     "day_move": -1544.0, "day_pct": -1.16,
+                                     "pnl": -8394.0, "pnl_pct": -5.62,
+                                     "missing": 2})
+    text = "\n".join(out)
+    assert "Worth ₹1,32,168 now" in text and "you put in ₹1,49,244" in text
+    assert "Today: 🔴 -₹1,544 (-1.2%)" in text
+    assert "Since you bought: 🔴 -₹8,394 (-5.6%)" in text
+    assert "2 holdings had no price" in text
+    assert heartbeat.portfolio_block({}) == []          # nothing owned, no block
+
+
+def test_ipo_brief_groups_by_action(monkeypatch):
+    from datetime import timedelta
+    from src import clock, ipo
+
+    today = clock.ist_today()
+    rows = [
+        {"name": "Shiprocket", "sme": False, "verdict": "APPLY-ZONE",
+         "why": "all bars ok", "gmp": 35.0, "gmp_pct": 36.1, "price": 97.0,
+         "total": 102.28, "qib": 125.2, "closes": today, "close": "x",
+         "updated": "14th Aug 13:10", "source": "investorgain.com (live)"},
+        {"name": "Dhoot Transmission", "sme": False, "verdict": "WATCH",
+         "why": "GMP qualifies; recheck subscription on the last day",
+         "gmp": 246.0, "gmp_pct": 28.2, "price": 872.0, "total": 3.06,
+         "qib": 4.59, "closes": today, "close": "x", "updated": "",
+         "source": "investorgain.com (live)"},
+        {"name": "Later Co", "sme": False, "verdict": "APPLY-ZONE", "why": "ok",
+         "gmp_pct": 25.0, "total": 20.0, "qib": 6.0, "close": "x",
+         "closes": today + timedelta(days=3), "updated": "",
+         "source": "investorgain.com (live)"},
+        {"name": "Q&T Foods", "sme": True, "verdict": "SKIP", "why": "no",
+         "gmp_pct": 0.9, "total": 1.21, "qib": None, "closes": today,
+         "close": "x", "updated": "", "source": "investorgain.com (live)"},
+        {"name": "Skytech", "sme": True, "verdict": "SKIP", "why": "no",
+         "gmp_pct": 16.9, "total": 0.26, "qib": 0.0, "closes": today,
+         "close": "x", "updated": "", "source": "investorgain.com (live)"},
+    ]
+    monkeypatch.setattr(ipo, "screen", lambda: rows)
+    b = ipo.brief(today)
+
+    # only same-day deadlines become to-dos: the one closing in 3 days must not
+    assert len(b["todo"]) == 2
+    assert "Apply for Shiprocket" in b["todo"][0]
+    assert "today is the last day, bids close at 4 pm" in b["todo"][0]
+    assert "Decide on Dhoot Transmission" in b["todo"][1]
+    assert "crosses 15x with QIB over 5x" in b["todo"][1]
+    assert not any("Later Co" in t for t in b["todo"])
+    assert any("closes Mon" in a or "closes " in a for a in b["act"])
+    # the five-rows-of-SKIP table collapses to one line
+    assert b["skip"] == "Not worth it today (2): Q&T Foods (0.9%), Skytech (16.9%)"
+    assert "as of 14th Aug 13:10" in b["footer"]
+    assert "grey-market premium 36.1% (₹35 over the ₹97 price)" in b["act"][0]
+
+    assert ipo.closing_phrase({"closes": today}, today) == \
+        "closes today — last day to apply"
+    assert ipo.closing_phrase({"closes": today + timedelta(days=3)}, today) == \
+        "closes " + clock.when(today + timedelta(days=3), today)
+
+
+def test_alert_body_plain_language():
+    from datetime import timedelta
+    from src import clock, watcher
+
+    rule = {"symbol": "INFY", "exchange": "NSE", "label": "below 200dma dip",
+            "mode": "level", "conditions": [
+                {"metric": "price_vs_ma200", "op": "<", "value": -10}]}
+    values = {"price": 1169.0, "pct_change_day": -0.5, "price_vs_ma200": -11.2}
+    ok, reasons, evaluable = watcher.evaluate_rule(rule, values)
+    assert ok and evaluable
+    assert reasons == ["the gap between price and its 200-day average is -11.2% "
+                       "— under your -10.0% line"]
+
+    body = watcher.alert_body(rule, values, reasons,
+                              clock.ist_today() - timedelta(days=2))
+    assert clock.stamp()[:12] in body                  # dated, always
+    assert "₹1,169" in body and "🔻 -0.5% today" in body
+    assert "3 days running" in body                    # explains the repeat
+    assert "Pause it" in body
+    fresh = watcher.alert_body(rule, values, reasons, clock.ist_today())
+    assert "turned true today" in fresh and "days running" not in fresh
+    # a crossing alert must not claim it will repeat daily
+    edge = watcher.alert_body({**rule, "mode": "edge"}, values, reasons)
+    assert "one-off crossing" in edge and "running" not in edge
+
+
+def test_level_rule_mails_once_a_day(monkeypatch):
+    from datetime import timedelta, timezone
+    from src import clock, watcher
+
+    now = clock.ist_now()
+    assert watcher._fired_today(now.isoformat()) is True
+    assert watcher._fired_today((now - timedelta(days=1)).isoformat()) is False
+    assert watcher._fired_today(None) is False
+    # stored timestamps are UTC; the same instant read as IST must still be today
+    assert watcher._fired_today(now.astimezone(timezone.utc).isoformat()) is True
+
+    # and the run loop honours it: a standing rule that already mailed today
+    # stays quiet even though its condition is still true
+    rule = {"id": 1, "symbol": "INFY", "exchange": "NSE", "label": "dip",
+            "mode": "level", "last_state": 1,
+            "true_since": (clock.ist_today() - timedelta(days=3)).isoformat(),
+            "last_triggered": now.astimezone(timezone.utc).isoformat(),
+            "conditions": [{"metric": "price", "op": "<", "value": 2000}]}
+    sent = []
+    monkeypatch.setattr(watcher.db, "init_db", lambda: None)
+    monkeypatch.setattr(watcher.db, "set_last_state", lambda *a: None)
+    monkeypatch.setattr(watcher.db, "set_true_since", lambda *a: None)
+    monkeypatch.setattr(watcher.db, "mark_triggered", lambda *a: None)
+    monkeypatch.setattr(watcher.db, "log_alert", lambda *a, **k: None)
+    monkeypatch.setattr(watcher.db, "get_holdings", lambda: [])
+    monkeypatch.setattr(watcher, "gather_values",
+                        lambda s, e: {"price": 1169.0, "pct_change_day": -0.5})
+    monkeypatch.setattr(watcher.alerts, "dispatch",
+                        lambda s, b, channels=None: sent.append(s) or ["email"])
+
+    monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [rule])
+    assert watcher.run_once(verbose=False) == [] and sent == []
+
+    # yesterday's mail doesn't hold it back — one a day, not one ever
+    stale = {**rule, "last_triggered": (now - timedelta(days=1)).astimezone(
+        timezone.utc).isoformat()}
+    monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [stale])
+    assert len(watcher.run_once(verbose=False)) == 1
+    assert sent and sent[0].startswith("🔔 INFY · dip · ")
 
 
 def test_shop_judge_and_parse():

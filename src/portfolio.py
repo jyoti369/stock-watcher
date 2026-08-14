@@ -27,6 +27,38 @@ def lot_row(holding: dict, values: dict) -> dict[str, Any]:
     }
 
 
+def by_symbol(rows: list[dict]) -> list[dict[str, Any]]:
+    """Roll lot rows up into one position per symbol, biggest holding first.
+
+    Three separate SUZLON buys are one position when you're reading a digest,
+    so the buy price shown is the quantity-weighted average of the lots.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        p = merged.setdefault(r["symbol"], {
+            "symbol": r["symbol"], "qty": 0.0, "invested": 0.0, "value": 0.0,
+            "price": r.get("price"), "day_pct": r.get("day_pct"),
+            "priced": False,
+        })
+        p["qty"] += r["qty"]
+        p["invested"] += r["invested"]
+        if r.get("value") is not None:
+            p["value"] += r["value"]
+            p["priced"] = True
+            p["price"], p["day_pct"] = r.get("price"), r.get("day_pct")
+    out = []
+    for p in merged.values():
+        if not p.pop("priced"):
+            p["value"] = None
+        p["buy_price"] = p["invested"] / p["qty"] if p["qty"] else None
+        p["pnl"] = (p["value"] - p["invested"]) if p["value"] is not None else None
+        p["pnl_pct"] = (p["pnl"] / p["invested"] * 100) \
+            if (p["pnl"] is not None and p["invested"]) else None
+        out.append(p)
+    out.sort(key=lambda p: -(p["value"] if p["value"] is not None else p["invested"]))
+    return out
+
+
 def totals(rows: list[dict]) -> dict[str, Any]:
     """Aggregate the lot rows. Day-move is derived from each lot's day % so the
     'today' figure is in rupees, not an average of percentages."""
