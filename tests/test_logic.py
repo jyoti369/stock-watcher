@@ -637,7 +637,7 @@ def test_money_formatting():
     assert fmt.signed_inr(52400) == "+₹52,400"
     assert fmt.pct(-0.48) == "-0.5%" and fmt.pct(14.62) == "+14.6%"
     assert fmt.money_dot(500) == "🟢" and fmt.money_dot(-500) == "🔴"
-    assert fmt.move(-0.5).startswith("🔻")
+    assert fmt.move(-0.5) == "▼ -0.5%" and fmt.move(0.7) == "▲ +0.7%"
 
 
 def test_positions_rolled_up_per_symbol():
@@ -744,6 +744,14 @@ def test_insights_are_derived_from_real_numbers():
     assert "everything you're down" in conc_loss[0]["text"]
 
     # a standing rule true for days is noise, not information
+    # a loss too big to be a loss: flag it as a cost-basis artefact, not a crash
+    odd = insights.suspect_cost_basis(
+        positions + [{"symbol": "ITCHOTELS", "pnl_pct": -75.0, "pnl": -330.0,
+                      "value": 330.0}])
+    assert odd and "ITCHOTELS -75.0%" in odd[0]["text"]
+    assert "demerger" in odd[0]["why"]
+    assert insights.suspect_cost_basis(positions) == []   # -34% is just a loss
+
     nag = insights.nagging_rule([{"id": 1, "symbol": "INFY", "active": 1,
                                   "mode": "level", "label": "below 200dma dip",
                                   "true_since": (today - timedelta(days=9)).isoformat()}],
@@ -804,7 +812,7 @@ def test_html_mail_colours_each_number_for_itself():
         return head[head.rindex("color:"):][6:13]
     assert colour_of("+0.7%") == mailhtml.GREEN     # today was up
     assert colour_of("-1.6%") == mailhtml.RED       # the position is in loss
-    assert "🔺" in rows and "down ₹68" in rows
+    assert "▲" in rows and "down ₹68" in rows
 
     # a no-price holding says so instead of showing a zero
     blank = mailhtml.stock_rows([{"symbol": "ITC", "price": None, "day_pct": None,
@@ -896,7 +904,7 @@ def test_alert_body_plain_language(monkeypatch):
     body, html_body = watcher.alert_body(rule, values, reasons,
                                          clock.ist_today() - timedelta(days=2))
     assert clock.stamp()[:12] in body                  # dated, always
-    assert "₹1,169" in body and "🔻 -0.5% today" in body
+    assert "₹1,169" in body and "▼ -0.5% today" in body
     assert "You hold 6 shares at ₹1,455 average" in body
     assert "-₹1,716" in body                           # what it costs you today
     assert "3 days running" in body                    # explains the repeat

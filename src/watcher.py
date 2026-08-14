@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from . import alerts, analysis, clock, datasource, db, fmt, mailhtml, portfolio
+from . import (alerts, analysis, brand, clock, datasource, db, fmt, mailhtml,
+               portfolio)
 from .config import CONFIG
 
 # metric key -> human label, used by the dashboard rule builder and the checker
@@ -115,6 +116,11 @@ def gather_values(symbol: str, exchange: str = "NSE") -> dict[str, float | None]
 
     return {
         "price": live["price"] if live.get("ok") else metrics.get("price"),
+        # ATP is the exchange's own average traded price; it stays None unless the
+        # feed published one, because a money app must not print a guessed price
+        "atp": live.get("atp"),
+        "day_high": live.get("day_high"),
+        "day_low": live.get("day_low"),
         "pct_change_day": live.get("pct_change"),
         "ret_1w": metrics.get("ret_1w"),
         "ret_1m": metrics.get("ret_1m"),
@@ -297,7 +303,7 @@ def run_once(verbose: bool = True) -> list[dict]:
             continue
 
         label = rule.get("label") or "alert"
-        subject = (f"🔔 {rule['symbol']} · {label} · "
+        subject = (f"{brand.ALERT_SUBJECT} {rule['symbol']} · {label} · "
                    f"{clock.short(today)} {clock.clock_time()}")
         body, html_body = alert_body(rule, values, reasons, true_since)
 

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import re
 
-UP, DOWN, FLAT = "🔺", "🔻", "▪️"
+# plain geometric arrows, not the emoji triangles: 🔺/🔻 carry their own colour
+# (red-ish and blue-ish) which fought the green/red we actually mean. These take
+# the colour of the text around them, so an up day reads green in the mail.
+UP, DOWN, FLAT = "▲", "▼", "–"
 GOOD, BAD, NEUTRAL = "🟢", "🔴", "▪️"
 
 

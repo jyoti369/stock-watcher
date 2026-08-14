@@ -13,12 +13,49 @@ it arrives. Needs the state key; with no key nothing is ever written.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, timedelta
 
 from .repo_state import STATE_DIR, _fernet
 
 REMINDERS_JSON = STATE_DIR / "reminders.json"
+
+
+def ref(r: dict) -> str:
+    """Short stable id for one reminder, derived from its own content.
+
+    Used by the tap-to-mark-done links in the mails: a row index would break
+    the moment a reminder is added or removed, and the text itself can't go in a
+    URL. Eight hex characters over text+date is plenty for a personal list, and
+    it changes if the reminder is edited — which is correct, since an edited
+    reminder is a different job.
+    """
+    raw = f"{r.get('text', '')}|{str(r.get('date', ''))[:10]}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:8]
+
+
+def find(rows: list[dict], reference: str) -> dict | None:
+    return next((r for r in rows or [] if ref(r) == reference), None)
+
+
+def mark_done(reference: str) -> str | None:
+    """Tick off the reminder with this id. Returns its text, or None if it
+    wasn't found (already done and edited, or a stale link)."""
+    rows = load()
+    if rows is None:
+        return None
+    target = find(rows, reference)
+    if target is None:
+        return None
+    # a repeating reminder shouldn't be killed by one tick — it rolls forward on
+    # its own, so record the date it was last handled instead
+    if repeats(target):
+        target["last_done"] = date.today().isoformat()
+    else:
+        target["done"] = True
+    save(rows)
+    return target.get("text")
 
 
 def load() -> list[dict] | None:
@@ -104,4 +141,10 @@ def due(r: dict, today: date, horizon_days: int = 7) -> bool:
     if r.get("done") and not repeats(r):
         return False
     eff = effective_date(r, today)
-    return eff is not None and eff <= today + timedelta(days=horizon_days)
+    if eff is None:
+        return False
+    # a repeating reminder ticked off for this occurrence goes quiet until the
+    # next one comes round, instead of nagging for the rest of the day
+    if r.get("last_done") and str(r["last_done"])[:10] >= eff.isoformat():
+        return False
+    return eff <= today + timedelta(days=horizon_days)

@@ -23,7 +23,19 @@ DEFAULTS: dict = {
     "digest_tips": True,
     # the long grey "how to read this" captions — helpful once, noise later
     "explainers": True,
+    # how the digest orders your stocks, and how many get a full row before the
+    # rest are listed compactly
+    "sort_by": "value",             # value | pnl | pnl_pct | day
+    "positions_shown": 12,          # 0 = give every holding its own row
+    # base URL of the hosted app, used for the "mark done" links in the mails
+    "app_url": "https://stock-watcher-zddsancprsyurdcql5zqis.streamlit.app",
+    "mail_actions": True,           # put those tap-to-act links in the mails
 }
+
+SORTS = {"value": "biggest holding first",
+         "pnl": "biggest profit or loss in rupees",
+         "pnl_pct": "biggest gain or loss in percent",
+         "day": "today's movers first"}
 
 
 def load() -> dict:

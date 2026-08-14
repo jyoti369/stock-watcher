@@ -27,6 +27,7 @@ except Exception:
     pass
 
 from src import (advice, advisor_bot, ai_insights, alerts, analysis, bearcase,
+                 brand,
                  clock, datasource, db, finance_plan, fmt, fundamentals,
                  gh_sync, importer, insights, ipo, mf, portfolio, projection,
                  reminders, repo_state, scan_history, sectors, settings, shop,
@@ -35,7 +36,8 @@ from src.config import DATA_DIR
 
 SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
 
-st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
+st.set_page_config(page_title=brand.PAGE_TITLE, page_icon=brand.ICON,
+                   layout="wide")
 
 # --- update feel -----------------------------------------------------------
 # Streamlit's default is to grey out the whole page on every rerun, which makes
@@ -110,7 +112,7 @@ def _require_password() -> None:
         if st.query_params.get("k") != key:
             st.query_params["k"] = key          # keep it in the URL for next refresh
         return
-    st.markdown("### 🔒 Stock Watcher")
+    st.markdown(f"### 🔒 {brand.NAME}")
     entered = st.text_input("Password", type="password")
     if entered == pw:
         st.session_state["_authed"] = True
@@ -259,8 +261,8 @@ def monte_carlo_block(symbol, exchange, years, amount, period_label):
 
 # ================================================================ sidebar
 with st.sidebar:
-    st.title("📈 Stock Watcher")
-    st.caption("Indian equities · NSE / BSE · free data")
+    st.title(f"{brand.ICON} {brand.NAME}")
+    st.caption(brand.TAGLINE)
 
     # Order is deliberate: the two buttons you reach for most sit at the top,
     # where they're reachable on a phone without scrolling a drawer. Adding a
@@ -556,6 +558,21 @@ _warm_ph.empty()
 
 PREFS = settings.load()
 
+# The mails carry "✓ Mark done" links back to here (?done=<reminder ref>). This
+# sits after the password gate (which preserves query params) and after
+# auto_sync, so the tick is pushed to the shared state the same as any in-app
+# edit. The param is stripped straight away, so a refresh can't re-fire it.
+_done_ref = st.query_params.get("done")
+if _done_ref:
+    _cleared = reminders.mark_done(str(_done_ref))
+    del st.query_params["done"]
+    if _cleared:
+        auto_sync()
+        st.success(f"✓ Ticked off: {_cleared[:90]}")
+    else:
+        st.warning("That reminder is already done, or has been edited since the "
+                   "mail went out — nothing to tick off.")
+
 
 def explain(text: str) -> None:
     """A 'how to read this' caption — hidden when you've turned explainers off
@@ -586,7 +603,9 @@ def _tips(bucket: str) -> list[dict]:
         except Exception:
             pass
     return insights.collect(
-        positions=positions[:12],
+        # every position, not just the ones a digest would print — the artefacts
+        # worth noticing (a -75% "loss" from a demerger) hide in the small ones
+        positions=positions,
         tail={"count": len(positions[12:]),
               "value": sum(p["value"] or 0 for p in positions[12:]),
               "pnl": sum(p["pnl"] or 0 for p in positions[12:]),
@@ -1951,10 +1970,31 @@ with tabs[10]:
                 "ipo": "ipo — how the flip rules work",
                 "habit": "habit — overdue reminders and reviews"}[c])
 
+        st.markdown("**📊 How the digest lists your stocks**")
+        ps1, ps2 = st.columns(2)
+        p_sort = ps1.selectbox(
+            "Order them by", list(settings.SORTS),
+            index=list(settings.SORTS).index(PREFS.get("sort_by", "value")),
+            format_func=lambda k: settings.SORTS[k],
+            help="The rupee and percent orders use the size of the move, so your "
+                 "worst loss and your best gain both reach the top.")
+        p_shown = ps2.slider(
+            "Full rows before the rest are listed compactly", 4, 25,
+            int(PREFS.get("positions_shown") or 25),
+            help="Set it to the top of the range to give every holding a full row.")
+
         st.markdown("**📬 Mails**")
         p_digest = st.checkbox(
             "Put the top tip in the daily digest", value=PREFS["digest_tips"],
             help="Adds one 'worth knowing' line to the after-close mail.")
+        p_actions = st.checkbox(
+            "Tap-to-tick links in the mails", value=PREFS.get("mail_actions", True),
+            help="Puts a ✓ Mark done button next to each overdue reminder. It "
+                 "opens this app and ticks it off — no typing.")
+        p_url = st.text_input(
+            "App address those links point at", value=PREFS.get("app_url", ""),
+            help="Where the mails should send you. The hosted Streamlit URL, so "
+                 "the links work from your phone.")
 
         st.markdown("**📖 Reading help**")
         p_explain = st.checkbox(
@@ -1966,7 +2006,9 @@ with tabs[10]:
             settings.save({"banner": p_banner, "banner_tips": p_count,
                            "banner_categories": p_cats, "digest_tips": p_digest,
                            "banner_min_urgency": p_urgency,
-                           "explainers": p_explain})
+                           "explainers": p_explain, "sort_by": p_sort,
+                           "positions_shown": 0 if p_shown >= 25 else p_shown,
+                           "mail_actions": p_actions, "app_url": p_url.strip()})
             auto_sync()
             st.toast("Settings saved")
             st.rerun()

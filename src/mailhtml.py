@@ -117,41 +117,79 @@ def stock_rows(positions: list[dict], watch_only: list[dict], tail: dict | None,
                 f'<div style="font:400 13px/1.4 {FONT}">{right_top}</div>'
                 f'<div style="font:400 12px/1.5 {FONT}">{right_sub}</div></td></tr>')
 
+    def day_cell(pct) -> str:
+        if pct is None:
+            return f'<span style="color:{MUTED}">—</span>'
+        # the arrow sits inside the coloured span, so an up day is a green ▲
+        return (f'<span style="color:{money_colour(pct)};white-space:nowrap">'
+                f'{fmt.arrow(pct)} {fmt.pct(pct)}</span>')
+
     for p in positions:
         if p["value"] is None:
             rows.append(row(escape(p["symbol"]), f"you hold {p['qty']:g}",
                             f'<span style="color:{MUTED}">no price</span>', ""))
             continue
-        day = f'{escape(fmt.arrow(p["day_pct"]))} {num(fmt.pct(p["day_pct"]), p["day_pct"], False)}' \
-            if p["day_pct"] is not None else f'<span style="color:{MUTED}">—</span>'
+        # LTP (what it last traded at) and your own average cost, the two prices
+        # a holdings screen is actually read for; ATP only when the exchange
+        # published one, and the day's range as the honest stand-in when not
+        sub = [f"LTP {escape(fmt.inr(p['price']))}",
+               f"avg {escape(fmt.inr(p.get('buy_price')))}"]
+        if p.get("atp"):
+            sub.append(f"ATP {escape(fmt.inr(p['atp']))}")
+        elif p.get("day_low") and p.get("day_high"):
+            sub.append(f"day {escape(fmt.inr(p['day_low']))}–"
+                       f"{escape(fmt.inr(p['day_high']))}")
+        sub.append(f"×{p['qty']:g}")
         rows.append(row(
             escape(p["symbol"]),
-            f"{escape(fmt.inr(p['price']))} · you hold {p['qty']:g}"
-            + (" · ⚠️ weak fundamentals" if p.get("weak") else ""),
-            f'<span style="color:{MUTED};font-size:12px">today</span> {day}',
+            " · ".join(sub) + (" · ⚠️ weak fundamentals" if p.get("weak") else ""),
+            f'<span style="color:{MUTED};font-size:12px">today</span> '
+            + day_cell(p["day_pct"]),
             num(f"{'up' if p['pnl'] >= 0 else 'down'} {fmt.inr(abs(p['pnl']))} "
                 f"({fmt.pct(p['pnl_pct'])})", p["pnl"])))
     if tail:
         rows.append(row(
             f"…and {tail['count']} smaller holdings",
-            escape(tail["names"]),
+            "listed below" if tail.get("rows") else escape(tail["names"]),
             f'<span style="color:{MUTED};font-size:12px">worth '
             f'{escape(fmt.inr(tail["value"]))}</span>',
             num(f"{'up' if tail['pnl'] >= 0 else 'down'} {fmt.inr(abs(tail['pnl']))}",
                 tail["pnl"])))
     for w in watch_only:
-        day = f'{escape(fmt.arrow(w["day_pct"]))} {num(fmt.pct(w["day_pct"]), w["day_pct"], False)}' \
-            if w.get("day_pct") is not None else f'<span style="color:{MUTED}">—</span>'
         rows.append(row(
             escape(w["symbol"]),
-            (escape(fmt.inr(w["price"])) if w.get("price") is not None else "no price")
-            + " · watching, not held"
+            (f"LTP {escape(fmt.inr(w['price']))}" if w.get("price") is not None
+             else "no price") + " · watching, not held"
             + (" · ⚠️ weak fundamentals" if w.get("weak") else ""),
-            f'<span style="color:{MUTED};font-size:12px">today</span> {day}', ""))
+            f'<span style="color:{MUTED};font-size:12px">today</span> '
+            + day_cell(w.get("day_pct")), ""))
     if not rows:
         return ""
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"'
             f' width="100%" style="padding-top:4px">{"".join(rows)}</table>')
+
+
+def small_holdings(tail: dict | None, fmt) -> str:
+    """The long tail, one compact line each — counted AND readable."""
+    if not tail or not tail.get("rows"):
+        return ""
+    cells = []
+    for p in tail["rows"]:
+        # the rupee figure is what it's WORTH and the percent is your profit on
+        # it, so only the percent takes the colour — one coloured pair read as if
+        # the value itself had gone up
+        right = (f'<span style="color:{MUTED}">worth {escape(fmt.inr(p["value"]))}'
+                 f'</span> &nbsp;{num(fmt.pct(p["pnl_pct"]), p["pnl"])}'
+                 if p.get("value") is not None
+                 else f'<span style="color:{MUTED}">no price</span>')
+        cells.append(
+            f'<tr><td style="padding:5px 2px;font:400 13px/1.5 {FONT};color:{INK}">'
+            f'{escape(p["symbol"])}'
+            f'<span style="color:{MUTED}"> ×{p["qty"]:g}</span></td>'
+            f'<td align="right" style="padding:5px 2px;font:400 13px/1.5 {FONT}">'
+            f'{right}</td></tr>')
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"'
+            f' width="100%" style="padding-top:2px">{"".join(cells)}</table>')
 
 
 def todo_cards(items: list[str]) -> str:
@@ -172,7 +210,9 @@ def todo_cards(items: list[str]) -> str:
 
 
 def dated_items(items: list[dict], tone: str = "plain") -> str:
-    """Reminder-style rows: the text, with its date and how far off it is."""
+    """Reminder-style rows: the text, its date, and — when the item carries a
+    `link` — a tap-to-mark-done button, so a finished job can be cleared from
+    the mail instead of nagging until you next open the app."""
     if not items:
         return ""
     bg = {"warn": RED_BG, "plain": PAGE}.get(tone, PAGE)
@@ -181,9 +221,18 @@ def dated_items(items: list[dict], tone: str = "plain") -> str:
     for i in items:
         when = f'<div style="font:400 12px/1.5 {FONT};color:{colour};padding-top:2px">' \
                f'{escape(i["when"])}</div>' if i.get("when") else ""
+        action = ""
+        if i.get("link"):
+            action = (f'<div style="padding-top:8px">'
+                      f'<a href="{escape(i["link"])}" style="font:600 12px/1 {FONT};'
+                      f'background:{GREEN};color:#ffffff;text-decoration:none;'
+                      f'padding:8px 13px;border-radius:16px;display:inline-block">'
+                      f'✓ Mark done</a>'
+                      f'<span style="font:400 11px/1.6 {FONT};color:{MUTED}">'
+                      f'&nbsp;&nbsp;opens the app and ticks it off</span></div>')
         out.append(f'<div style="background:{bg};border-radius:8px;padding:9px 11px;'
                    f'margin-top:8px;font:400 14px/1.55 {FONT};color:{INK}">'
-                   f'{escape(i["text"])}{when}</div>')
+                   f'{escape(i["text"])}{when}{action}</div>')
     return "".join(out)
 
 

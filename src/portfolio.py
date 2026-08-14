@@ -19,6 +19,9 @@ def lot_row(holding: dict, values: dict) -> dict[str, Any]:
         "qty": holding["qty"],
         "buy_price": holding["buy_price"],
         "price": price,
+        "atp": values.get("atp"),
+        "day_high": values.get("day_high"),
+        "day_low": values.get("day_low"),
         "day_pct": values.get("pct_change_day"),
         "invested": invested,
         "value": value,
@@ -27,18 +30,32 @@ def lot_row(holding: dict, values: dict) -> dict[str, Any]:
     }
 
 
-def by_symbol(rows: list[dict]) -> list[dict[str, Any]]:
-    """Roll lot rows up into one position per symbol, biggest holding first.
+_SORTS = {
+    "value": lambda p: -(p["value"] if p["value"] is not None else p["invested"]),
+    "pnl": lambda p: -abs(p["pnl"]) if p["pnl"] is not None else 1,
+    "pnl_pct": lambda p: -abs(p["pnl_pct"]) if p["pnl_pct"] is not None else 1,
+    "day": lambda p: -abs(p["day_pct"]) if p.get("day_pct") is not None else 1,
+}
+
+
+def by_symbol(rows: list[dict], sort: str = "value") -> list[dict[str, Any]]:
+    """Roll lot rows up into one position per symbol.
 
     Three separate SUZLON buys are one position when you're reading a digest,
     so the buy price shown is the quantity-weighted average of the lots.
+
+    `sort`: value = biggest holding first · pnl = biggest rupee move first ·
+    pnl_pct = biggest percentage move first · day = today's movers first. The
+    P&L orders use the absolute size, so the worst loss and the best gain both
+    surface instead of one end of the list being buried.
     """
     merged: dict[str, dict[str, Any]] = {}
     for r in rows:
         p = merged.setdefault(r["symbol"], {
             "symbol": r["symbol"], "qty": 0.0, "invested": 0.0, "value": 0.0,
             "price": r.get("price"), "day_pct": r.get("day_pct"),
-            "priced": False,
+            "atp": r.get("atp"), "day_high": r.get("day_high"),
+            "day_low": r.get("day_low"), "priced": False,
         })
         p["qty"] += r["qty"]
         p["invested"] += r["invested"]
@@ -46,6 +63,8 @@ def by_symbol(rows: list[dict]) -> list[dict[str, Any]]:
             p["value"] += r["value"]
             p["priced"] = True
             p["price"], p["day_pct"] = r.get("price"), r.get("day_pct")
+            for k in ("atp", "day_high", "day_low"):
+                p[k] = r.get(k)
     out = []
     for p in merged.values():
         if not p.pop("priced"):
@@ -55,7 +74,7 @@ def by_symbol(rows: list[dict]) -> list[dict[str, Any]]:
         p["pnl_pct"] = (p["pnl"] / p["invested"] * 100) \
             if (p["pnl"] is not None and p["invested"]) else None
         out.append(p)
-    out.sort(key=lambda p: -(p["value"] if p["value"] is not None else p["invested"]))
+    out.sort(key=_SORTS.get(sort, _SORTS["value"]))
     return out
 
 

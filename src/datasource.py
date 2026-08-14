@@ -149,10 +149,15 @@ def get_fundamentals(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
 
 def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
     """Latest price + day change. NSE (nsepython) first, yfinance fallback.
-    Keys: price, prev_close, change, pct_change, source, ok. Cached ~2 min."""
+
+    Keys: price (LTP), atp (the day's average traded price / VWAP, only when the
+    exchange publishes it — never estimated), day_open/day_high/day_low,
+    prev_close, change, pct_change, source, ok. Cached ~2 min.
+    """
     key = f"live:{yf_symbol(symbol, exchange)}"
     cached = _cached(key, ttl=120)
-    _nores = {"price": None, "prev_close": None, "change": None,
+    _nores = {"price": None, "atp": None, "day_open": None, "day_high": None,
+              "day_low": None, "prev_close": None, "change": None,
               "pct_change": None, "source": None, "ok": False}
     if cached is _MISS:
         return dict(_nores)
@@ -161,18 +166,31 @@ def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
 
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
 
+    def _f(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def attempt(exch):
-        # NSE live first (real-time) for NSE names
+        # NSE live first (real-time) for NSE names. Note NSE's endpoints refuse
+        # datacenter IPs, so on the cloud/Action this path just fails through to
+        # yfinance — which has no ATP, hence atp=None there rather than a guess.
         if exch.upper() == "NSE":
             try:
                 from nsepython import nse_eq
                 pi = (nse_eq(sym) or {}).get("priceInfo", {})
                 price = pi.get("lastPrice")
                 if price is not None:
+                    intra = pi.get("intraDayHighLow") or {}
                     return {"price": float(price),
-                            "prev_close": float(pi["previousClose"]) if pi.get("previousClose") is not None else None,
-                            "change": float(pi["change"]) if pi.get("change") is not None else None,
-                            "pct_change": float(pi["pChange"]) if pi.get("pChange") is not None else None,
+                            "atp": _f(pi.get("vwap")),
+                            "day_open": _f(pi.get("open")),
+                            "day_high": _f(intra.get("max")),
+                            "day_low": _f(intra.get("min")),
+                            "prev_close": _f(pi.get("previousClose")),
+                            "change": _f(pi.get("change")),
+                            "pct_change": _f(pi.get("pChange")),
                             "source": "nse", "ok": True}
             except Exception:
                 pass
@@ -184,10 +202,12 @@ def get_live_quote(symbol: str, exchange: str = "NSE") -> dict[str, Any]:
             if price is not None:
                 change = (price - prev) if prev else None
                 pct = (change / prev * 100) if (prev and change is not None) else None
-                return {"price": float(price),
-                        "prev_close": float(prev) if prev is not None else None,
-                        "change": float(change) if change is not None else None,
-                        "pct_change": float(pct) if pct is not None else None,
+                return {"price": float(price), "atp": None,
+                        "day_open": _f(getattr(fi, "open", None)),
+                        "day_high": _f(getattr(fi, "day_high", None)),
+                        "day_low": _f(getattr(fi, "day_low", None)),
+                        "prev_close": _f(prev),
+                        "change": _f(change), "pct_change": _f(pct),
                         "source": "yfinance", "ok": True}
         except Exception:
             pass

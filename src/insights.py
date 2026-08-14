@@ -147,6 +147,28 @@ def loss_is_concentrated(positions: list[dict], totals: dict) -> list[dict]:
                 "whole list.")]
 
 
+def suspect_cost_basis(positions: list[dict]) -> list[dict]:
+    """A loss too big to be a loss.
+
+    ITCHOTELS showing -75% and PRSMJOHNSN -53% in the same portfolio isn't the
+    market; it's a demerger and a split where the price adjusted and the
+    recorded buy price didn't. Worth saying, because every total above it is
+    wrong by the same amount.
+    """
+    odd = [p for p in positions
+           if p.get("pnl_pct") is not None and p["pnl_pct"] < -60]
+    if not odd:
+        return []
+    names = ", ".join(f"{p['symbol']} {fmt.pct(p['pnl_pct'])}" for p in odd[:3])
+    return [tip("costbasis", "hygiene", 58,
+                f"{names} — a loss that size is usually not a loss.",
+                "A demerger, split or bonus moves the price without changing the "
+                "buy price your statement recorded, so the app compares today's "
+                "adjusted price against an unadjusted cost.",
+                "Portfolio tab → Manage holdings, correct the buy price to the "
+                "post-event one; every total gets more honest.")]
+
+
 def attention_tail(positions: list[dict], tail: dict | None) -> list[dict]:
     if not tail or tail.get("count", 0) < 6:
         return []
@@ -382,6 +404,7 @@ def collect(*, positions=None, tail=None, totals=None, holdings=None, prices=Non
     tips += unprotected_losers(positions, advice_rows or [], rules or [])
     tips += unplanned_winners(positions, advice_rows or [])
     tips += loss_is_concentrated(positions, totals)
+    tips += suspect_cost_basis(positions)
     tips += attention_tail(positions, tail)
     tips += ltcg_countdown(holdings or [], prices or {}, today)
     tips += missing_buy_dates(holdings or [])

@@ -21,8 +21,8 @@ from __future__ import annotations
 import sys
 from datetime import date
 
-from . import (advice, alerts, analysis, clock, datasource, db, fmt, insights,
-               ipo, mailhtml, portfolio, reminders, settings, watcher)
+from . import (advice, alerts, analysis, brand, clock, datasource, db, fmt,
+               insights, ipo, mailhtml, portfolio, reminders, settings, watcher)
 
 _OVERDUE_SHOWN = 4          # older ones get counted, not listed
 _POSITIONS_SHOWN = 12       # the rest roll into one summary line
@@ -48,7 +48,8 @@ def _light_values(symbol: str, exchange: str) -> dict:
     yfinance quota."""
     q = datasource.get_live_quote(symbol, exchange)
     return {"price": q.get("price") if q.get("ok") else None,
-            "pct_change_day": q.get("pct_change")}
+            "pct_change_day": q.get("pct_change"), "atp": q.get("atp"),
+            "day_high": q.get("day_high"), "day_low": q.get("day_low")}
 
 
 def money_report() -> dict:
@@ -72,19 +73,22 @@ def money_report() -> dict:
 
     lots = [portfolio.lot_row(h, vals(h["symbol"], h.get("exchange") or "NSE"))
             for h in holdings]
-    positions = portfolio.by_symbol(lots)
+    prefs = settings.load()
+    positions = portfolio.by_symbol(lots, sort=prefs.get("sort_by", "value"))
     totals = portfolio.totals(lots) if lots else {}
 
     unavailable, unpriced = 0, []
-    # biggest holdings get a row each; the long tail of small ones is one row,
-    # so a 20-position list doesn't bury what actually moves your money
-    shown = positions[:_POSITIONS_SHOWN]
+    # the top holdings get a full row each; the rest are listed compactly rather
+    # than hidden, so nothing you own is invisible. Settings → 0 gives every
+    # holding a full row.
+    cap = int(prefs.get("positions_shown", _POSITIONS_SHOWN) or len(positions))
+    shown = positions[:cap]
     for p in shown:
         p["rating"] = _rating(p["symbol"], watch)
         p["weak"] = p["rating"] == "Weak"
         if p["value"] is None:
             unpriced.append(p["symbol"])
-    rest = positions[_POSITIONS_SHOWN:]
+    rest = positions[cap:]
     tail = None
     if rest:
         priced = [p for p in rest if p["value"] is not None]
@@ -93,7 +97,13 @@ def money_report() -> dict:
                 "value": sum(p["value"] for p in priced),
                 "pnl": sum(p["pnl"] for p in priced),
                 "names": ", ".join(p["symbol"] for p in rest[:8])
-                         + (", …" if len(rest) > 8 else "")}
+                         + (", …" if len(rest) > 8 else ""),
+                # every one of them, so "10 smaller holdings" can be read rather
+                # than just counted
+                "rows": [{"symbol": p["symbol"], "qty": p["qty"],
+                          "value": p["value"], "pnl": p["pnl"],
+                          "pnl_pct": p["pnl_pct"], "price": p["price"]}
+                         for p in rest]}
 
     held = {p["symbol"] for p in positions}
     watch_only = []
@@ -215,7 +225,7 @@ def reminder_buckets(today: date | None = None) -> dict[str, list[dict]]:
         if not reminders.due(r, today):
             continue
         eff = reminders.effective_date(r, today)
-        item = {"text": r["text"], "date": eff}
+        item = {"text": r["text"], "date": eff, "ref": reminders.ref(r)}
         bucket = "today" if (eff is None or eff == today) \
             else "overdue" if eff < today else "upcoming"
         out[bucket].append(item)
@@ -276,10 +286,13 @@ def worth_knowing(report: dict, today: date, limit: int = 1) -> list[dict]:
     if not settings.get("digest_tips"):
         return []
     try:
+        # the tail rows count as positions here too, or a suspicious -75% in the
+        # small holdings would never be noticed
+        every = report["positions"] + list((report.get("tail") or {}).get("rows", []))
         return insights.choose(insights.collect(
-            positions=report["positions"], tail=report.get("tail"),
+            positions=every, tail=report.get("tail"),
             totals=report["totals"], holdings=db.get_holdings(),
-            prices={p["symbol"]: p.get("price") for p in report["positions"]},
+            prices={p["symbol"]: p.get("price") for p in every},
             ratings={p["symbol"]: p.get("rating") for p in report["positions"]},
             advice_rows=advice.load_advice() or [],
             rules=db.get_rules(active_only=False),
@@ -291,13 +304,28 @@ def worth_knowing(report: dict, today: date, limit: int = 1) -> list[dict]:
         return []
 
 
-def _dated(items: list[dict], today: date) -> list[dict]:
+def done_link(item: dict) -> str:
+    """URL that opens the app and ticks this reminder off. Empty when there's no
+    app URL configured or you've switched mail actions off."""
+    prefs = settings.load()
+    base = str(prefs.get("app_url") or "").rstrip("/")
+    if not base or not prefs.get("mail_actions", True) or not item.get("ref"):
+        return ""
+    return f"{base}/?done={item['ref']}"
+
+
+def _dated(items: list[dict], today: date, actions: bool = False) -> list[dict]:
     """Reminder items in the shape the HTML renderer wants."""
-    return [{"text": i["text"],
-             "when": f"was due {clock.when(i['date'], today)}"
-                     if i["date"] and i["date"] < today
-                     else (clock.when(i["date"], today) if i["date"] else "")}
-            for i in items]
+    out = []
+    for i in items:
+        row = {"text": i["text"],
+               "when": f"was due {clock.when(i['date'], today)}"
+                       if i["date"] and i["date"] < today
+                       else (clock.when(i["date"], today) if i["date"] else "")}
+        if actions:
+            row["link"] = done_link(i)
+        out.append(row)
+    return out
 
 
 def send_daily() -> list[str]:
@@ -324,6 +352,9 @@ def send_daily() -> list[str]:
             "Stock by stock",
             mailhtml.stock_rows(report["positions"], report["watch_only"],
                                 report["tail"], fmt)
+            + (mailhtml.section("The smaller holdings",
+                                mailhtml.small_holdings(report["tail"], fmt))
+               if (report["tail"] or {}).get("rows") else "")
             + (mailhtml.note("No live price for "
                              + ", ".join(report["unpriced"])
                              + " — if that's a broker-statement name rather than "
@@ -344,8 +375,8 @@ def send_daily() -> list[str]:
                      + "\n".join(render_overdue(rem["overdue"], today)))
         html_blocks.append(mailhtml.section(
             "Past their date — not marked done",
-            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today),
-                                 "warn")
+            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today,
+                                        actions=True), "warn")
             + (mailhtml.note(f"…and {len(rem['overdue']) - _OVERDUE_SHOWN} more "
                              f"past their date")
                if len(rem["overdue"]) > _OVERDUE_SHOWN else ""), "warn"))
@@ -354,7 +385,7 @@ def send_daily() -> list[str]:
                      + "\n".join(f"• {i['text']}" for i in rem["today"]))
         html_blocks.append(mailhtml.section(
             f"Set for today ({clock.short(today)}) — still open",
-            mailhtml.dated_items([{"text": i["text"]} for i in rem["today"]])))
+            mailhtml.dated_items(_dated(rem["today"], today, actions=True))))
     if rem["upcoming"]:
         parts.append("📆 Coming up\n" + "\n".join(render_upcoming(rem["upcoming"], today)))
         html_blocks.append(mailhtml.section(
@@ -388,14 +419,14 @@ def send_daily() -> list[str]:
                  "really does mean nothing crossed your lines.")
     parts.append(f"{footer}\n({tail_note})")
 
-    subject = f"📊 Stock Watcher · {clock.short(today)}"
+    subject = f"{brand.DIGEST_SUBJECT} · {clock.short(today)}"
     if totals.get("invested"):
         subject += (f" · today {fmt.signed_inr(totals.get('day_move'))}"
                     f" ({fmt.pct(totals.get('day_pct'))}), overall "
                     f"{fmt.pct(totals.get('pnl_pct'))}")
     else:
         subject += " · daily digest"
-    html_body = mailhtml.page("Stock Watcher · daily digest", head, html_blocks,
+    html_body = mailhtml.page(brand.DIGEST_TITLE, head, html_blocks,
                               f"{footer}<br>{tail_note}")
     channels = alerts.dispatch(subject, "\n\n".join(parts), html_body=html_body)
     db.log_alert(None, "DIGEST", "-",
@@ -438,8 +469,8 @@ def send_morning() -> list[str]:
                         + "\n".join(render_overdue(rem["overdue"], today)))
         html_blocks.append(mailhtml.section(
             "Past their date — deal with them or clear them",
-            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today),
-                                 "warn"), "warn"))
+            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today,
+                                        actions=True), "warn"), "warn"))
     if rev["overdue"]:
         sections.append("⏰ Advice reviews you're late on\n" + "\n".join(rev["overdue"]))
         html_blocks.append(mailhtml.section(
@@ -481,10 +512,10 @@ def send_morning() -> list[str]:
         print("[heartbeat] morning brief: nothing due, no open IPOs — staying quiet")
         return []
     count = len(todo)
-    subject = f"🌅 Stock Watcher · {clock.short(today)} · " + (
+    subject = f"{brand.BRIEF_SUBJECT} · {clock.short(today)} · " + (
         f"{count} thing{'s' if count > 1 else ''} to do today" if count
         else "midday brief")
-    html_body = mailhtml.page("Stock Watcher · midday brief", head, html_blocks,
+    html_body = mailhtml.page(brand.BRIEF_TITLE, head, html_blocks,
                               (ipos["footer"] + " Apply on the last day, one lot "
                                "per PAN.") if ipos["footer"] else
                               "Apply on the last day, one lot per PAN.")
