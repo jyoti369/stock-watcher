@@ -226,15 +226,20 @@ def screen() -> list[dict]:
                            "gmp_pct": g.get("gmp_pct"), "updated": "",
                            "closes": closes})
     now = clock.ist_now()
+    out = []
     for row in merged:
         row["source"] = source
         row["window"] = window(row, now)          # decided by the clock, not the date
+        # An issue whose window has shut is history: whether you applied or
+        # missed it, the next move is Angel One's allotment mail, not this app's.
+        # Dropping it here keeps it out of every screen and every digest.
+        if row["window"] == "shut":
+            continue
         row["verdict"], row["why"] = verdict(row)
-    # anything you can still act on first; today's shut issues sink below the
-    # ones still open, since they're now just waiting on allotment
-    order = {"APPLY-ZONE": 0, "WATCH": 1, "SKIP": 2, "NO DATA": 3, "CLOSED": 4}
-    merged.sort(key=lambda r: (order.get(r["verdict"], 9), -(r["gmp_pct"] or 0)))
-    return merged
+        out.append(row)
+    order = {"APPLY-ZONE": 0, "WATCH": 1, "SKIP": 2, "NO DATA": 3}
+    out.sort(key=lambda r: (order.get(r["verdict"], 9), -(r["gmp_pct"] or 0)))
+    return out
 
 
 def verdict(row: dict) -> tuple[str, str]:
@@ -354,17 +359,18 @@ def brief(today: date | None = None, now: datetime | None = None) -> dict:
     rows = screen()
     if not rows:
         return {"act": [], "watch": [], "skip": None, "footer": "", "todo": [],
-                "rows": [], "closed": []}
+                "rows": []}
     now = now or clock.ist_now()          # injectable so tests don't drift by hour
     today = today or now.date()
-    act, watch, skipped, todo, closed = [], [], [], [], []
+    act, watch, skipped, todo = [], [], [], []
     table = []
     for r in rows:
+        state = r.get("window") or window(r, now)
+        if state == "shut":
+            continue                      # past the cutoff = not this app's business
         kind = "SME" if r.get("sme") else "mainboard"
         head = f"{r['name']} ({kind})"
-        state = r.get("window") or window(r, now)
-        # a to-do only exists while you can still act: last day AND before the
-        # 4pm cutoff. After it, the same issue belongs under "waiting".
+        # a to-do only exists while you can still act: last day AND before 4pm
         actionable = state == "last-day"
         table.append({"name": r["name"], "kind": kind, "verdict": r["verdict"],
                       "numbers": numbers_phrase(r),
@@ -381,10 +387,7 @@ def brief(today: date | None = None, now: datetime | None = None) -> dict:
                       # columns without reaching back into screen()'s rows
                       "gmp_pct": r.get("gmp_pct"), "total": r.get("total"),
                       "qib": r.get("qib")})
-        if r["verdict"] == "CLOSED":
-            closed.append(f"{head} — {numbers_phrase(r, compact=True)} · "
-                          f"{closing_phrase(r, now)}")
-        elif r["verdict"] == "APPLY-ZONE":
+        if r["verdict"] == "APPLY-ZONE":
             act.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, now)}")
             if actionable:
                 todo.append(f"Apply for {r['name']} ({kind} IPO) — today is the "
@@ -395,25 +398,17 @@ def brief(today: date | None = None, now: datetime | None = None) -> dict:
                          f"\n  {r['why']}")
             if actionable:
                 bar = RULES["sme" if r.get("sme") else "mainboard"]
-                todo.append(f"Decide on {r['name']} ({kind} IPO) today — bids "
-                            f"close at 4 pm. The premium clears the bar but "
-                            f"{numbers_phrase(r, compact=True)}. Apply only if the book "
-                            f"crosses {bar['total']:g}x with QIB over "
-                            f"{bar['qib']:g}x.")
+                todo.append(f"Decide on {r['name']} ({kind} IPO) before 4 pm — "
+                            f"{numbers_phrase(r, compact=True)}; "
+                            f"needs {bar['total']:g}x with QIB {bar['qib']:g}x+.")
         else:
-            pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "no GMP"
-            skipped.append(f"{r['name']} ({pct})")
+            skipped.append(r["name"])
     upd = next((r["updated"] for r in rows if r.get("updated")), "")
-    footer = ("Numbers from " + str(rows[0].get("source", "?"))
-              + (f", as of {upd}" if upd else "")
-              + ". Bars: mainboard needs 20% premium, 15x book, QIB 5x · "
-                "SME needs 35%, 25x, QIB 2x.")
-    skip = None
-    if skipped:
-        skip = (f"Not worth it today ({len(skipped)}): "
-                + ", ".join(skipped[:6])
-                + (f" and {len(skipped) - 6} more" if len(skipped) > 6 else ""))
+    footer = (str(rows[0].get("source", "?")) + (f", as of {upd}" if upd else ""))
+    # a count, not a roll-call: naming five issues you're not applying for is
+    # five names to read and nothing to decide
+    skip = (f"{len(skipped)} others below the bar." if skipped else None)
     # the HTML mail draws its own table, so it gets the rows too — same numbers,
     # just not pre-strung into sentences
     return {"act": act, "watch": watch, "skip": skip, "footer": footer,
-            "todo": todo, "rows": table, "closed": closed}
+            "todo": todo, "rows": table}

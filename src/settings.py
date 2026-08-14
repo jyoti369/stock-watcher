@@ -17,13 +17,14 @@ SETTINGS_JSON = STATE_DIR / "settings.json"
 DEFAULTS: dict = {
     # the smart banner above the tabs
     "banner": True,
-    "banner_tips": 2,               # how many tips to show at once (1-3)
+    "banner_tips": 1,               # how many tips to show at once (1-3)
     "banner_categories": ["risk", "money", "tax", "hygiene", "habit"],
     "banner_min_urgency": 0,        # 60 = only show things that look urgent
     # put the top tip into the daily digest mail too
     "digest_tips": True,
-    # the long grey "how to read this" captions — helpful once, noise later
-    "explainers": True,
+    # the long grey "how to read this" captions. Off by default: they were
+    # written as help and became furniture — "the more info the more confusion".
+    "explainers": False,
     # how the digest orders your stocks, and how many get a full row before the
     # rest are listed compactly
     "sort_by": "value",             # value | pnl | pnl_pct | day

@@ -848,7 +848,7 @@ def test_settings_roundtrip_and_defaults(tmp_path, monkeypatch):
     settings.save({"banner": False, "banner_tips": 3})
     got = settings.load()
     assert got["banner"] is False and got["banner_tips"] == 3
-    assert got["explainers"] is True                     # untouched key kept
+    assert got["explainers"] is False                    # untouched key kept
     assert set(got) == set(settings.DEFAULTS)            # no junk keys
 
     (tmp_path / "settings.json").write_text("{not json")
@@ -978,12 +978,13 @@ def test_ipo_brief_groups_by_action(monkeypatch):
     assert "Apply for Shiprocket" in b["todo"][0]
     assert "today is the last day, bids close at 4 pm" in b["todo"][0]
     assert "Decide on Dhoot Transmission" in b["todo"][1]
-    assert "crosses 15x with QIB over 5x" in b["todo"][1]
+    assert "needs 15x with QIB 5x+" in b["todo"][1]
     assert not any("Later Co" in t for t in b["todo"])
     assert any("closes Mon" in a or "closes " in a for a in b["act"])
     # the five-rows-of-SKIP table collapses to one line
-    assert b["skip"] == "Not worth it today (2): Q&T Foods (0.9%), Skytech (16.9%)"
-    assert "as of 14th Aug 13:10" in b["footer"]
+    # a count, not a roll-call of things you're not buying
+    assert b["skip"] == "2 others below the bar."
+    assert b["footer"] == "investorgain.com (live), as of 14th Aug 13:10"
     assert "grey-market premium 36.1% (₹35 over the ₹97 price)" in b["act"][0]
 
     assert ipo.closing_phrase({"closes": today}, midday) == \

@@ -152,9 +152,8 @@ def text_stock_lines(report: dict) -> list[str]:
     if report["unpriced"]:
         # these are usually broker-statement names ("NIPPON ETF JUNI.") that no
         # exchange recognises — say so, or the gap repeats forever unexplained
-        lines.append(f"No live price for {', '.join(report['unpriced'])} — if "
-                     f"that's a broker-statement name rather than the NSE symbol, "
-                     f"fix it in the app's Portfolio tab and it'll start counting")
+        lines.append(f"No price for {', '.join(report['unpriced'])} — fix the "
+                     f"symbol in Portfolio.")
     return lines
 
 
@@ -416,9 +415,7 @@ def send_daily() -> list[str]:
             + (f"\n<i>⚠️ {tg.esc(caveat)}</i>" if caveat else ""))
     stock_lines = text_stock_lines(report)
     if stock_lines:
-        parts.append("📋 Stock by stock (each number is coloured for itself: "
-                     "the day's move, then your own profit)\n"
-                     + "\n".join(stock_lines))
+        parts.append("📋 Stock by stock\n" + "\n".join(stock_lines))
         tg_parts.append(tg_stock_block(report))
         html_blocks.append(mailhtml.section(
             "Stock by stock",
@@ -427,11 +424,8 @@ def send_daily() -> list[str]:
             + (mailhtml.section("The smaller holdings",
                                 mailhtml.small_holdings(report["tail"], fmt))
                if (report["tail"] or {}).get("rows") else "")
-            + (mailhtml.note("No live price for "
-                             + ", ".join(report["unpriced"])
-                             + " — if that's a broker-statement name rather than "
-                               "the NSE symbol, fix it in the Portfolio tab and "
-                               "it'll start counting")
+            + (mailhtml.note("No price for " + ", ".join(report["unpriced"])
+                             + " — fix the symbol in Portfolio.")
                if report["unpriced"] else "")))
 
     fired = alerts_today_lines()
@@ -508,9 +502,7 @@ def send_daily() -> list[str]:
         f"⚠️ {_plural(report['unavailable'], 'stock')} had no price this run"
     footer = (f"{health} · {_plural(n_rules, 'alert rule')} armed · "
               f"{len(fired)} fired today.")
-    tail_note = ("this arrives every trading day around 3:45 pm. Getting it "
-                 "means the watcher is alive, so silence from the alert checker "
-                 "really does mean nothing crossed your lines.")
+    tail_note = "Silence from the alert checker means nothing crossed your lines."
     parts.append(f"{footer}\n({tail_note})")
 
     subject = f"{brand.DIGEST_SUBJECT} · {clock.short(today)}"
@@ -590,7 +582,15 @@ def send_morning() -> list[str]:
             mailhtml.bullets([ln.lstrip("• ") for ln in rev["overdue"]]), "warn"))
         tg_parts.append(tg.b("⏰ Reviews you're late on") + "\n"
                         + tg.bullets([ln.lstrip("• ") for ln in rev["overdue"]]))
-    if ipos["act"] or ipos["watch"] or ipos["skip"]:
+    keep = [r for r in ipos["rows"] if r["verdict"] not in ("SKIP", "CLOSED")]
+    if not keep and ipos["skip"]:
+        # nothing clears the bar: that's one line, not a section with a header
+        # over a list of things you're not buying
+        line = f"🎯 {ipos['skip'].replace(' others below the bar.', ' open IPOs, none clear the bar.')}"
+        sections.append(line)
+        html_blocks.append(mailhtml.note(line))
+        tg_parts.append(f"<i>{tg.esc(line)}</i>")
+    elif keep:
         block = ["🎯 IPOs open right now"]
         if ipos["act"]:
             block.append("Passes every bar:\n" + "\n".join("• " + a for a in ipos["act"]))
@@ -601,38 +601,23 @@ def send_morning() -> list[str]:
             block.append(ipos["skip"])
         block.append(ipos["footer"])
         sections.append("\n".join(block))
-        # the still-open ones only: a shut issue has its own section below
-        keep = [r for r in ipos["rows"] if r["verdict"] not in ("SKIP", "CLOSED")]
         html_blocks.append(mailhtml.section(
             "IPOs open right now",
             mailhtml.ipo_rows(keep)
             + (mailhtml.note(ipos["skip"]) if ipos["skip"] else "")))
         # as columns: premium, book, QIB and when it ends — the four numbers the
         # house rules are actually checked against
-        if keep:
-            tg_parts.append(
-                tg.b("🎯 IPOs open") + "\n"
-                + tg.table(["IPO", "GMP", "Book", "QIB", "Ends"],
-                           [[tg.short_symbol(r["name"]),
-                             (f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None
-                              else "—"),
-                             (f"{r['total']:g}x" if r.get("total") is not None
-                              else "—"),
-                             (f"{r['qib']:g}x" if r.get("qib") is not None else "—"),
-                             r.get("ends", "?")] for r in keep])
-                + (f"\n<i>{tg.esc(ipos['skip'])}</i>" if ipos["skip"] else ""))
-        elif ipos["skip"]:
-            tg_parts.append(tg.b("🎯 IPOs open") + f"\n<i>{tg.esc(ipos['skip'])}</i>")
-    if ipos.get("closed"):
-        # today's shut issues: nothing to do, but you want to know the bid is in
-        # and roughly when allotment lands
-        sections.append("⌛ Applications closed — waiting on allotment\n"
-                        + "\n".join("• " + c for c in ipos["closed"]))
-        html_blocks.append(mailhtml.section(
-            "Applications closed — waiting on allotment",
-            mailhtml.bullets(ipos["closed"])))
-        tg_parts.append(tg.b("⌛ Closed, awaiting allotment") + "\n"
-                        + tg.bullets(ipos["closed"]))
+        tg_parts.append(
+            tg.b("🎯 IPOs open") + "\n"
+            + tg.table(["IPO", "GMP", "Book", "QIB", "Ends"],
+                       [[tg.short_symbol(r["name"]),
+                         (f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None
+                          else "—"),
+                         (f"{r['total']:g}x" if r.get("total") is not None
+                          else "—"),
+                         (f"{r['qib']:g}x" if r.get("qib") is not None else "—"),
+                         r.get("ends", "?")] for r in keep])
+            + (f"\n<i>{tg.esc(ipos['skip'])}</i>" if ipos["skip"] else ""))
     if drops:
         sections.append("🛒 Tracked prices moved\n" + "\n".join(drops))
         html_blocks.append(mailhtml.section("Tracked prices moved",
@@ -664,9 +649,7 @@ def send_morning() -> list[str]:
         f"{count} thing{'s' if count > 1 else ''} to do today" if count
         else "midday brief")
     html_body = mailhtml.page(brand.BRIEF_TITLE, head, html_blocks,
-                              (ipos["footer"] + " Apply on the last day, one lot "
-                               "per PAN.") if ipos["footer"] else
-                              "Apply on the last day, one lot per PAN.")
+                              ipos.get("footer", ""))
     if ipos.get("footer"):
         tg_parts.append(f"<i>{tg.esc(ipos['footer'])}</i>")
     app_url = str(settings.get("app_url") or "").rstrip("/")

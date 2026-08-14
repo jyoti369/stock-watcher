@@ -1784,14 +1784,9 @@ with tabs[7]:
 # ================================================================ ipo screener
 with tabs[8]:
     st.subheader("🎯 IPO screener — apply-for-the-listing-pop rules")
-    explain("House rules, tuned for the flip strategy (apply → sell in the first "
-               "30 min of listing): **Mainboard** needs GMP ≥ 20% + total ≥ 15x + "
-               "QIB ≥ 5x · **SME** needs GMP ≥ 35% + total ≥ 25x + QIB ≥ 2x (min "
-               "application ~₹2L+, pure lottery). Always apply on the LAST day, "
-               "late morning, 1 lot per PAN. GMP is unofficial and easiest to fake "
-               "in SME issues — QIB numbers are the honesty check. Data: "
-               "investorgain.com live (updates through the day; ipowatch.in as "
-               "fallback), also in the 12:05pm Telegram brief.")
+    st.caption("Mainboard needs GMP ≥ 20%, book ≥ 15x, QIB ≥ 5x · SME needs 35%, "
+               "25x, QIB ≥ 2x. Apply on the last day before 4 pm, 1 lot per PAN. "
+               "Closed issues drop off this list.")
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _ipo_screen_cached(bucket: str):
@@ -1831,11 +1826,9 @@ with tabs[8]:
                     f"({'SME' if r.get('sme') else 'Mainboard'}) — GMP {pct} · "
                     f"total {tot} · QIB {qib} · " + tail)
                 st.caption(f"{r['verdict']}: {r['why']}")
-            explain("APPLY-ZONE = passes every bar **today** — still apply only "
-                    "on the last day, before the 4 pm cutoff. WATCH = GMP "
-                    "qualifies but the book is still filling (normal on day 1-2). "
-                    "⌛ CLOSED = the application window has gone; what's left is "
-                    "the allotment. Numbers move all day; recheck before paying.")
+            explain("APPLY-ZONE passes every bar · WATCH means the premium "
+                    "qualifies but the book is still filling. Numbers move all "
+                    "day.")
 
 # ================================================================ buy advisor
 with tabs[9]:
