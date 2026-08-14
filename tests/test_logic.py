@@ -804,7 +804,7 @@ def test_html_mail_colours_each_number_for_itself():
     # stock is down today", which it isn't.
     rows = mailhtml.stock_rows(
         [{"symbol": "ICICIBANK", "price": 1417.0, "day_pct": 0.7, "qty": 3,
-          "value": 4251.0, "pnl": -68.0, "pnl_pct": -1.6}],
+          "buy_price": 1439.67, "value": 4251.0, "pnl": -68.0, "pnl_pct": -1.6}],
         [], None, fmt)
     def colour_of(needle: str) -> str:
         """The colour declared on the span that prints this number."""
@@ -813,6 +813,10 @@ def test_html_mail_colours_each_number_for_itself():
     assert colour_of("+0.7%") == mailhtml.GREEN     # today was up
     assert colour_of("-1.6%") == mailhtml.RED       # the position is in loss
     assert "▲" in rows and "down ₹68" in rows
+    # LTP, your average cost and what it's worth — and no intraday high-low
+    # range, which told you nothing you'd act on
+    assert "LTP ₹1,417" in rows and "avg ₹1,440" in rows
+    assert "worth ₹4,251" in rows and "day ₹" not in rows
 
     # a no-price holding says so instead of showing a zero
     blank = mailhtml.stock_rows([{"symbol": "ITC", "price": None, "day_pct": None,

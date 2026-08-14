@@ -130,7 +130,8 @@ def text_stock_lines(report: dict) -> list[str]:
             lines.append(f"{p['symbol']} — no price this run (you hold {p['qty']:g})")
             continue
         lines.append(f"{p['symbol']} {fmt.inr(p['price'])} · today "
-                     f"{fmt.move(p['day_pct'])} · you hold {p['qty']:g}, "
+                     f"{fmt.move(p['day_pct'])} · you hold {p['qty']:g} "
+                     f"worth {fmt.inr(p['value'])}, "
                      f"{'up' if p['pnl'] >= 0 else 'down'} {fmt.inr(abs(p['pnl']))} "
                      f"({fmt.pct(p['pnl_pct'])})"
                      + (" · ⚠️ weak fundamentals" if p.get("weak") else ""))

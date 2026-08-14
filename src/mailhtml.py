@@ -129,16 +129,15 @@ def stock_rows(positions: list[dict], watch_only: list[dict], tail: dict | None,
             rows.append(row(escape(p["symbol"]), f"you hold {p['qty']:g}",
                             f'<span style="color:{MUTED}">no price</span>', ""))
             continue
-        # LTP (what it last traded at) and your own average cost, the two prices
-        # a holdings screen is actually read for; ATP only when the exchange
-        # published one, and the day's range as the honest stand-in when not
+        # LTP, your own average cost, and what the position is worth — the three
+        # numbers a holdings screen is actually read for. The intraday high-low
+        # range lived here and was dropped: today's move is already on the right,
+        # and nothing about ₹2,690–₹2,751 changes a decision.
         sub = [f"LTP {escape(fmt.inr(p['price']))}",
                f"avg {escape(fmt.inr(p.get('buy_price')))}"]
         if p.get("atp"):
             sub.append(f"ATP {escape(fmt.inr(p['atp']))}")
-        elif p.get("day_low") and p.get("day_high"):
-            sub.append(f"day {escape(fmt.inr(p['day_low']))}–"
-                       f"{escape(fmt.inr(p['day_high']))}")
+        sub.append(f"worth {escape(fmt.inr(p['value']))}")
         sub.append(f"×{p['qty']:g}")
         rows.append(row(
             escape(p["symbol"]),
