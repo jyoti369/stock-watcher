@@ -796,6 +796,49 @@ def test_settings_roundtrip_and_defaults(tmp_path, monkeypatch):
     assert settings.load() == settings.DEFAULTS          # corrupt file can't break it
 
 
+def test_telegram_rendering():
+    from src import tg
+
+    # columns line up: names left, numbers right, widths from the content
+    block = tg.table(["Stock", "Worth", "P&L"],
+                     [["ASIANPAINT", "51,230", "+5.9%"],
+                      ["CDSL", "16,133", "+0.1%"]])
+    import html as _html
+    # measure what Telegram will DISPLAY, so &amp; counts as the one character
+    # it renders as
+    body = _html.unescape(block.replace("<pre>", "").replace("</pre>", ""))
+    rows = body.split("\n")
+    assert len({len(r) for r in rows}) == 1          # every row the same width
+    assert rows[1].startswith("ASIANPAINT") and rows[1].endswith("+5.9%")
+    assert rows[2].startswith("CDSL ")               # padded, not shifted
+    assert "&amp;" in block                          # "P&L" escaped inside <pre>
+    assert tg.table(["a"], []) == ""
+
+    assert tg.money(1234567) == "12,34,567" and tg.money(-1890) == "-1,890"
+    assert tg.money(None, 6) == "     —"
+    assert tg.pct(-0.04) == "0.0%" and tg.pct(5.9) == "+5.9%"
+    assert tg.short_symbol("NIPPON ETF JUNI.") == "NIPPON ETF…"
+    assert tg.short_symbol("CDSL") == "CDSL"
+
+    # the long tail collapses behind a tap instead of filling the screen
+    exp = tg.collapsed("…and 10 smaller", "x")
+    assert "<blockquote expandable>" in exp and "<b>" in exp
+    assert tg.collapsed("t", "") == ""
+
+    # content is escaped but the markup we add is not
+    assert tg.b("Q&T") == "<b>Q&amp;T</b>"
+    assert tg.bullets(["a & b"]) == "· a &amp; b"
+
+    # Telegram rejects anything over 4096 chars, so it must be cut, not lost
+    long = tg.clip("\n".join(f"line {i}" for i in range(2000)))
+    assert len(long) <= tg.LIMIT and long.endswith("open the app for the rest.")
+
+    keys = tg.buttons([("✓ Done: pay tax", "https://x/?done=1"),
+                       ("📱 Open", "https://x"), ("skipped", "")])
+    assert keys == [[{"text": "✓ Done: pay tax", "url": "https://x/?done=1"}],
+                    [{"text": "📱 Open", "url": "https://x"}]]
+
+
 def test_html_mail_colours_each_number_for_itself():
     from src import fmt, mailhtml
 
@@ -905,8 +948,8 @@ def test_alert_body_plain_language(monkeypatch):
     assert reasons == ["the gap between price and its 200-day average is -11.2% "
                        "— under your -10.0% line"]
 
-    body, html_body = watcher.alert_body(rule, values, reasons,
-                                         clock.ist_today() - timedelta(days=2))
+    body, html_body, tg_text = watcher.alert_body(
+        rule, values, reasons, clock.ist_today() - timedelta(days=2))
     assert clock.stamp()[:12] in body                  # dated, always
     assert "₹1,169" in body and "▼ -0.5% today" in body
     assert "You hold 6 shares at ₹1,455 average" in body
@@ -918,10 +961,10 @@ def test_alert_body_plain_language(monkeypatch):
     assert "below 200dma dip" in html_body and "3 days running" in html_body
     assert html_body.count("<script") == 0
 
-    fresh, _ = watcher.alert_body(rule, values, reasons, clock.ist_today())
+    fresh, _, _ = watcher.alert_body(rule, values, reasons, clock.ist_today())
     assert "turned true today" in fresh and "days running" not in fresh
     # a crossing alert must not claim it will repeat daily
-    edge, _ = watcher.alert_body({**rule, "mode": "edge"}, values, reasons)
+    edge, _, _ = watcher.alert_body({**rule, "mode": "edge"}, values, reasons)
     assert "One-off crossing" in edge and "running" not in edge
     # a missing holdings store must not stop the alert going out
     monkeypatch.setattr(watcher.db, "get_holdings",
@@ -957,8 +1000,9 @@ def test_level_rule_mails_once_a_day(monkeypatch):
     monkeypatch.setattr(watcher, "gather_values",
                         lambda s, e: {"price": 1169.0, "pct_change_day": -0.5})
     monkeypatch.setattr(watcher.alerts, "dispatch",
-                        lambda s, b, channels=None, html_body=None:
-                        sent.append((s, html_body)) or ["email"])
+                        lambda s, b, channels=None, html_body=None, tg_text=None,
+                        tg_buttons=None:
+                        sent.append((s, html_body, tg_text)) or ["email"])
 
     monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [rule])
     assert watcher.run_once(verbose=False) == [] and sent == []

@@ -22,7 +22,8 @@ import sys
 from datetime import date
 
 from . import (advice, alerts, analysis, brand, clock, datasource, db, fmt,
-               insights, ipo, mailhtml, portfolio, reminders, settings, watcher)
+               insights, ipo, mailhtml, portfolio, reminders, settings, tg,
+               watcher)
 
 _OVERDUE_SHOWN = 4          # older ones get counted, not listed
 _POSITIONS_SHOWN = 12       # the rest roll into one summary line
@@ -277,6 +278,35 @@ def review_buckets(today: date | None = None) -> dict[str, list[str]]:
 
 # ---- the two mails -------------------------------------------------------
 
+def tg_stock_block(report: dict) -> str:
+    """The holdings as a monospace table: name, what it's worth, your P&L, today.
+
+    Four short columns beat one wrapped sentence per stock on a phone — the
+    prose version was three lines each and read as a wall.
+    """
+    rows = []
+    for p in report["positions"]:
+        rows.append([tg.short_symbol(p["symbol"]),
+                     tg.money(p["value"]), tg.pct(p["pnl_pct"]),
+                     tg.pct(p["day_pct"])])
+    out = tg.table(["Stock", "Worth", "P&L", "Today"], rows)
+    t = report.get("tail")
+    if t and t.get("rows"):
+        inner = tg.table(["Stock", "Worth", "P&L"],
+                         [[tg.short_symbol(r["symbol"]), tg.money(r["value"]),
+                           tg.pct(r["pnl_pct"])] for r in t["rows"]])
+        out += "\n" + tg.collapsed(
+            f"…and {t['count']} smaller, {fmt.inr(t['value'])} together "
+            f"({fmt.pct((t['pnl'] / (t['value'] - t['pnl']) * 100) if t['value'] != t['pnl'] else 0)})",
+            inner)
+    watching = [w for w in report["watch_only"] if w.get("price") is not None]
+    if watching:
+        out += "\n" + tg.b("Watching") + "\n" + tg.bullets(
+            [f"{w['symbol']} {fmt.inr(w['price'])} ({fmt.pct(w['day_pct'])})"
+             for w in watching])
+    return out
+
+
 def worth_knowing(report: dict, today: date, limit: int = 1) -> list[dict]:
     """The one thing the app noticed today, for the bottom of the digest.
 
@@ -339,16 +369,32 @@ def send_daily() -> list[str]:
     head = _header("market still open, so these prices are mid-session",
                    "after the close")
     parts, html_blocks = [head], []
+    # Telegram gets its own build: bold headers, monospace columns, an
+    # expandable block for the small holdings, and buttons at the end
+    tg_parts = [f"{tg.b(brand.NAME + ' · ' + clock.short(today))}\n"
+                f"<i>{tg.esc(head.split(' — ')[-1])}</i>"]
+    tg_keys: list[tuple[str, str]] = []
 
     block = portfolio_block(totals)
     if block:
         parts.append("\n".join(block))
     html_blocks.append(mailhtml.money_card(totals, fmt))
+    if totals.get("invested"):
+        tg_parts.append(
+            f"{tg.b('Worth ' + fmt.inr(totals['value']))}  "
+            f"<i>(put in {tg.esc(fmt.inr(totals['invested']))})</i>\n"
+            f"Today {fmt.money_dot(totals.get('day_move'))} "
+            f"{tg.esc(fmt.signed_inr(totals.get('day_move')))} "
+            f"({tg.esc(fmt.pct(totals.get('day_pct')))})\n"
+            f"Overall {fmt.money_dot(totals.get('pnl'))} "
+            f"{tg.esc(fmt.signed_inr(totals.get('pnl')))} "
+            f"({tg.esc(fmt.pct(totals.get('pnl_pct')))})")
     stock_lines = text_stock_lines(report)
     if stock_lines:
         parts.append("📋 Stock by stock (each number is coloured for itself: "
                      "the day's move, then your own profit)\n"
                      + "\n".join(stock_lines))
+        tg_parts.append(tg_stock_block(report))
         html_blocks.append(mailhtml.section(
             "Stock by stock",
             mailhtml.stock_rows(report["positions"], report["watch_only"],
@@ -369,11 +415,20 @@ def send_daily() -> list[str]:
         html_blocks.append(mailhtml.section(
             "Your alerts that fired today",
             mailhtml.bullets([ln.lstrip("• ") for ln in fired])))
+        tg_parts.append(tg.b("Alerts today") + "\n"
+                        + tg.bullets([ln.lstrip("• ") for ln in fired]))
 
     rem = reminder_buckets(today)
     if rem["overdue"]:
         parts.append("⚠️ Past their date — not marked done\n"
                      + "\n".join(render_overdue(rem["overdue"], today)))
+        tg_parts.append(
+            tg.b("⚠️ Past their date") + "\n"
+            + "\n".join(f"· {tg.esc(i['text'][:110])}\n  <i>was due "
+                        f"{tg.esc(clock.when(i['date'], today))}</i>"
+                        for i in rem["overdue"][:_OVERDUE_SHOWN]))
+        tg_keys += [(f"✓ Done: {i['text'][:32]}", done_link(i))
+                    for i in rem["overdue"][:_OVERDUE_SHOWN]]
         html_blocks.append(mailhtml.section(
             "Past their date — not marked done",
             mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today,
@@ -387,10 +442,18 @@ def send_daily() -> list[str]:
         html_blocks.append(mailhtml.section(
             f"Set for today ({clock.short(today)}) — still open",
             mailhtml.dated_items(_dated(rem["today"], today, actions=True))))
+        tg_parts.append(tg.b(f"📅 Today ({clock.short(today)})") + "\n"
+                        + tg.bullets([i["text"][:110] for i in rem["today"]]))
+        tg_keys += [(f"✓ Done: {i['text'][:32]}", done_link(i))
+                    for i in rem["today"]]
     if rem["upcoming"]:
         parts.append("📆 Coming up\n" + "\n".join(render_upcoming(rem["upcoming"], today)))
         html_blocks.append(mailhtml.section(
             "Coming up", mailhtml.dated_items(_dated(rem["upcoming"], today))))
+        tg_parts.append(tg.collapsed(
+            f"📆 Coming up ({len(rem['upcoming'])})",
+            "\n".join(f"{tg.esc(clock.when(i['date'], today))} — "
+                      f"{tg.esc(i['text'][:110])}" for i in rem["upcoming"])))
 
     rev = review_buckets(today)
     if rev["overdue"] or rev["due"]:
@@ -400,6 +463,9 @@ def send_daily() -> list[str]:
             "Advice ledger — calls to revisit",
             mailhtml.bullets([ln.lstrip("• ")
                               for ln in rev["overdue"] + rev["due"]])))
+        tg_parts.append(tg.b("⏰ Calls to revisit") + "\n"
+                        + tg.bullets([ln.lstrip("• ")
+                                      for ln in rev["overdue"] + rev["due"]]))
 
     for t in worth_knowing(report, today):
         parts.append("💡 Worth knowing\n" + insights.as_text(t)
@@ -409,6 +475,8 @@ def send_daily() -> list[str]:
             mailhtml.dated_items([{"text": t["text"],
                                    "when": " ".join(x for x in (t.get("why"),
                                                                 t.get("action")) if x)}])))
+        tg_parts.append(f"{tg.b('💡 Worth knowing')}\n{tg.esc(t['text'])}\n"
+                        f"<i>{tg.esc(t.get('why', ''))}</i>")
 
     n_rules = len(db.get_rules(active_only=True))
     health = "Watcher is healthy" if report["unavailable"] == 0 else \
@@ -429,7 +497,13 @@ def send_daily() -> list[str]:
         subject += " · daily digest"
     html_body = mailhtml.page(brand.DIGEST_TITLE, head, html_blocks,
                               f"{footer}<br>{tail_note}")
-    channels = alerts.dispatch(subject, "\n\n".join(parts), html_body=html_body)
+    tg_parts.append(f"<i>{tg.esc(footer)}</i>")
+    app_url = str(settings.get("app_url") or "").rstrip("/")
+    if app_url:
+        tg_keys.append((f"📱 Open {brand.NAME}", app_url))
+    channels = alerts.dispatch(subject, "\n\n".join(parts), html_body=html_body,
+                               tg_text=tg.clip("\n\n".join(tg_parts)),
+                               tg_buttons=tg.buttons(tg_keys))
     db.log_alert(None, "DIGEST", "-",
                  f"daily digest ({report['unavailable']} unavailable)", channels)
     print(f"[heartbeat] sent to {channels or 'no channel configured'}")
@@ -459,12 +533,17 @@ def send_morning() -> list[str]:
     body = [head]
     sections: list[str] = []
     html_blocks: list[str] = []
+    tg_parts = [f"{tg.b(brand.NAME + ' · ' + clock.short(today))}\n"
+                f"<i>{tg.esc(head.split(' — ')[-1])}</i>"]
+    tg_keys: list[tuple[str, str]] = []
 
     if todo:
         sections.append("⚡ Do today\n" + "\n".join(
             f"{n}. {t}" for n, t in enumerate(todo, 1)))
         html_blocks.append(mailhtml.section("Do today", mailhtml.todo_cards(todo),
                                            "act"))
+        tg_parts.append(tg.b("⚡ Do today") + "\n" + "\n".join(
+            f"{n}. {tg.esc(t)}" for n, t in enumerate(todo, 1)))
     if rem["overdue"]:
         sections.append("⚠️ Past their date — deal with them or clear them\n"
                         + "\n".join(render_overdue(rem["overdue"], today)))
@@ -472,11 +551,20 @@ def send_morning() -> list[str]:
             "Past their date — deal with them or clear them",
             mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today,
                                         actions=True), "warn"), "warn"))
+        tg_parts.append(
+            tg.b("⚠️ Past their date") + "\n"
+            + "\n".join(f"· {tg.esc(i['text'][:110])}\n  <i>was due "
+                        f"{tg.esc(clock.when(i['date'], today))}</i>"
+                        for i in rem["overdue"][:_OVERDUE_SHOWN]))
+        tg_keys += [(f"✓ Done: {i['text'][:32]}", done_link(i))
+                    for i in rem["overdue"][:_OVERDUE_SHOWN]]
     if rev["overdue"]:
         sections.append("⏰ Advice reviews you're late on\n" + "\n".join(rev["overdue"]))
         html_blocks.append(mailhtml.section(
             "Advice reviews you're late on",
             mailhtml.bullets([ln.lstrip("• ") for ln in rev["overdue"]]), "warn"))
+        tg_parts.append(tg.b("⏰ Reviews you're late on") + "\n"
+                        + tg.bullets([ln.lstrip("• ") for ln in rev["overdue"]]))
     if ipos["act"] or ipos["watch"] or ipos["skip"]:
         block = ["🎯 IPOs open right now"]
         if ipos["act"]:
@@ -493,21 +581,41 @@ def send_morning() -> list[str]:
             "IPOs open right now",
             mailhtml.ipo_rows(keep)
             + (mailhtml.note(ipos["skip"]) if ipos["skip"] else "")))
+        # the open IPOs as columns: premium, book, QIB, last day — the four
+        # numbers the house rules are actually checked against
+        ipo_rows = [[tg.short_symbol(r["name"]),
+                     (f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "—"),
+                     (f"{r['total']:g}x" if r.get("total") is not None else "—"),
+                     (f"{r['qib']:g}x" if r.get("qib") is not None else "—"),
+                     ("TODAY" if r.get("last_day") else
+                      clock.short(r["closes"]) if r.get("closes") else "—")]
+                    for r in keep]
+        tg_parts.append(
+            tg.b("🎯 IPOs open") + "\n"
+            + tg.table(["IPO", "GMP", "Book", "QIB", "Ends"], ipo_rows)
+            + (f"\n<i>{tg.esc(ipos['skip'])}</i>" if ipos["skip"] else ""))
     if drops:
         sections.append("🛒 Tracked prices moved\n" + "\n".join(drops))
         html_blocks.append(mailhtml.section("Tracked prices moved",
                                            mailhtml.bullets(drops)))
+        tg_parts.append(tg.b("🛒 Prices moved") + "\n" + tg.bullets(drops))
     if rem["upcoming"]:
         sections.append("📆 Coming up (nothing to do yet)\n"
                         + "\n".join(render_upcoming(rem["upcoming"], today)))
         html_blocks.append(mailhtml.section(
             "Coming up (nothing to do yet)",
             mailhtml.dated_items(_dated(rem["upcoming"], today))))
+        tg_parts.append(tg.collapsed(
+            f"📆 Coming up ({len(rem['upcoming'])})",
+            "\n".join(f"{tg.esc(clock.when(i['date'], today))} — "
+                      f"{tg.esc(i['text'][:110])}" for i in rem["upcoming"])))
     if rev["due"]:
         sections.append("⏰ Advice reviews due\n" + "\n".join(rev["due"]))
         html_blocks.append(mailhtml.section(
             "Advice reviews due",
             mailhtml.bullets([ln.lstrip("• ") for ln in rev["due"]])))
+        tg_parts.append(tg.b("⏰ Reviews due") + "\n"
+                        + tg.bullets([ln.lstrip("• ") for ln in rev["due"]]))
 
     if not sections:
         print("[heartbeat] morning brief: nothing due, no open IPOs — staying quiet")
@@ -520,8 +628,15 @@ def send_morning() -> list[str]:
                               (ipos["footer"] + " Apply on the last day, one lot "
                                "per PAN.") if ipos["footer"] else
                               "Apply on the last day, one lot per PAN.")
+    if ipos.get("footer"):
+        tg_parts.append(f"<i>{tg.esc(ipos['footer'])}</i>")
+    app_url = str(settings.get("app_url") or "").rstrip("/")
+    if app_url:
+        tg_keys.append((f"📱 Open {brand.NAME}", app_url))
     channels = alerts.dispatch(subject, "\n\n".join(body + sections),
-                               html_body=html_body)
+                               html_body=html_body,
+                               tg_text=tg.clip("\n\n".join(tg_parts)),
+                               tg_buttons=tg.buttons(tg_keys))
     db.log_alert(None, "DIGEST", "-", "midday brief", channels)
     print(f"[heartbeat] morning brief sent to {channels or 'no channel configured'}")
     return channels

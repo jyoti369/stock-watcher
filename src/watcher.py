@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from . import (alerts, analysis, brand, clock, datasource, db, fmt, mailhtml,
-               portfolio)
+               portfolio, settings, tg)
 from .config import CONFIG
 
 # metric key -> human label, used by the dashboard rule builder and the checker
@@ -172,25 +172,42 @@ def _fired_today(last_triggered: str | None) -> bool:
     return bool(ist and ist.date() == clock.ist_today())
 
 
-def _holding_note(symbol: str, price: float | None) -> str:
-    """'You hold 25 shares at ₹1,320 average — that's -₹3,775 (-11.4%) today.'
-    Empty when you don't own it or there's no live price."""
+def _position(symbol: str, price: float | None) -> dict | None:
+    """Your position in this stock at this price, or None if you don't hold it
+    (or there's no holdings store on this run — an alert must still send)."""
     if price is None:
-        return ""
+        return None
     try:
         lots = [h for h in db.get_holdings() if h["symbol"] == symbol.upper()]
     except Exception:
-        return ""          # no holdings store on this run — the alert still sends
+        return None
     if not lots:
+        return None
+    pos = portfolio.by_symbol([portfolio.lot_row(h, {"price": price})
+                               for h in lots])
+    return pos[0] if pos else None
+
+
+def _holding_note(symbol: str, price: float | None) -> str:
+    """'You hold 25 shares at ₹1,320 average — that's -₹3,775 (-11.4%) today.'
+    Empty when you don't own it or there's no live price."""
+    p = _position(symbol, price)
+    if not p:
         return ""
-    pos = portfolio.by_symbol([portfolio.lot_row(h, {"price": price}) for h in lots])
-    if not pos:
-        return ""
-    p = pos[0]
     unit = "share" if p["qty"] == 1 else "shares"
     return (f"You hold {p['qty']:g} {unit} at {fmt.inr(p['buy_price'])} average — "
             f"that position is {fmt.signed_inr(p['pnl'])} "
             f"({fmt.pct(p['pnl_pct'])}) at this price.")
+
+
+def _holding_short(symbol: str, price: float | None) -> str:
+    """The same fact in a phone-width line: 'You hold 6 at ₹1,455 → -₹1,719
+    (-19.7%)'. Telegram wraps a full sentence into three lines."""
+    p = _position(symbol, price)
+    if not p:
+        return ""
+    return (f"You hold {p['qty']:g} at {fmt.inr(p['buy_price'])} → "
+            f"{fmt.signed_inr(p['pnl'])} ({fmt.pct(p['pnl_pct'])})")
 
 
 def _repeat_note(rule: dict, true_since: date | None) -> str:
@@ -245,7 +262,19 @@ def alert_body(rule: dict, values: dict, reasons: list[str],
                              reasons, gloss, note, repeat, fmt,
                              day if isinstance(day, (int, float)) else None)],
         "your own rule fired this, it isn't advice — check before acting")
-    return "\n".join(out), html_body
+
+    # Telegram version: the headline, the one reason, your position, and the
+    # repeat note in italics. No wrapped paragraphs.
+    tg_lines = [f"{tg.b(rule['symbol'] + ' · ' + label)}",
+                f"{tg.esc(price_line)}"
+                + (f"  {fmt.arrow(day)} {tg.esc(fmt.pct(day))} today"
+                   if isinstance(day, (int, float)) else ""),
+                "", tg.bullets(reasons)]
+    short = _holding_short(rule["symbol"], price)
+    if short:
+        tg_lines += ["", tg.esc(short)]
+    tg_lines += ["", f"<i>{tg.esc(repeat)}</i>"]
+    return "\n".join(out), html_body, tg.clip("\n".join(tg_lines))
 
 
 def run_once(verbose: bool = True) -> list[dict]:
@@ -305,9 +334,12 @@ def run_once(verbose: bool = True) -> list[dict]:
         label = rule.get("label") or "alert"
         subject = (f"{brand.ALERT_SUBJECT} {rule['symbol']} · {label} · "
                    f"{clock.short(today)} {clock.clock_time()}")
-        body, html_body = alert_body(rule, values, reasons, true_since)
-
-        channels = alerts.dispatch(subject, body, html_body=html_body)
+        body, html_body, tg_text = alert_body(rule, values, reasons, true_since)
+        app_url = str(settings.get("app_url") or "").rstrip("/")
+        channels = alerts.dispatch(
+            subject, body, html_body=html_body, tg_text=tg_text,
+            tg_buttons=tg.buttons([(f"📱 Open {brand.NAME}", app_url)])
+            if app_url else None)
         db.mark_triggered(rule["id"])
         db.log_alert(rule["id"], rule["symbol"], rule["exchange"], f"{label}: " + "; ".join(reasons), channels)
         fired.append({"symbol": rule["symbol"], "label": label, "reasons": reasons, "channels": channels})
