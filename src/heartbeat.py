@@ -22,7 +22,7 @@ import sys
 from datetime import date
 
 from . import (advice, alerts, analysis, clock, datasource, db, fmt, ipo,
-               portfolio, reminders, watcher)
+               mailhtml, portfolio, reminders, watcher)
 
 _OVERDUE_SHOWN = 4          # older ones get counted, not listed
 _POSITIONS_SHOWN = 12       # the rest roll into one summary line
@@ -52,12 +52,12 @@ def _light_values(symbol: str, exchange: str) -> dict:
 
 
 def money_report() -> dict:
-    """Everything the after-close mail says about money.
+    """Everything the after-close mail says about money, as data.
 
-    {lines, totals, unavailable} — one line per stock you hold or watch, and
-    the portfolio totals. The colour on each line is your own profit or loss
-    on that stock (green = up, red = down); for stocks you only watch there's
-    no money in it, so the line says so instead of pretending.
+    {positions, tail, watch_only, totals, unavailable, unpriced}. Rendered
+    twice — text_stock_lines() for Telegram, mailhtml.stock_rows() for the
+    email — so neither version can drift into saying something the other
+    doesn't.
     """
     watch = {(w["symbol"], w["exchange"]): w for w in db.get_watchlist()}
     holdings = db.get_holdings()
@@ -75,53 +75,74 @@ def money_report() -> dict:
     positions = portfolio.by_symbol(lots)
     totals = portfolio.totals(lots) if lots else {}
 
-    lines, unavailable, unpriced = [], 0, []
-    # biggest holdings get a line each; the long tail of small ones is one line,
+    unavailable, unpriced = 0, []
+    # biggest holdings get a row each; the long tail of small ones is one row,
     # so a 20-position list doesn't bury what actually moves your money
-    for p in positions[:_POSITIONS_SHOWN]:
-        v = f"{p['symbol']} {fmt.inr(p['price'])}" if p["price"] is not None \
-            else p["symbol"]
+    shown = positions[:_POSITIONS_SHOWN]
+    for p in shown:
+        p["weak"] = bool(_weak_note(p["symbol"], watch))
         if p["value"] is None:
             unpriced.append(p["symbol"])
-            lines.append(f"⚪ {p['symbol']} — no price this run "
-                         f"(you hold {p['qty']:g})")
-            continue
-        word = "up" if (p["pnl"] or 0) >= 0 else "down"
-        lines.append(f"{fmt.money_dot(p['pnl'])} {v} (today {fmt.move(p['day_pct'])})"
-                     f" — you hold {p['qty']:g}, {word} {fmt.inr(abs(p['pnl']))} "
-                     f"({fmt.pct(p['pnl_pct'])})" + _weak_note(p["symbol"], watch))
-    tail = positions[_POSITIONS_SHOWN:]
-    if tail:
-        priced = [p for p in tail if p["value"] is not None]
-        unpriced += [p["symbol"] for p in tail if p["value"] is None]
-        worth = sum(p["value"] for p in priced)
-        pnl = sum(p["pnl"] for p in priced)
-        lines.append(f"{fmt.money_dot(pnl)} …and {_plural(len(tail), 'smaller holding')}"
-                     f" worth {fmt.inr(worth)} together, "
-                     f"{'up' if pnl >= 0 else 'down'} {fmt.inr(abs(pnl))} overall "
-                     f"({', '.join(p['symbol'] for p in tail[:8])}"
-                     f"{', …' if len(tail) > 8 else ''})")
+    rest = positions[_POSITIONS_SHOWN:]
+    tail = None
+    if rest:
+        priced = [p for p in rest if p["value"] is not None]
+        unpriced += [p["symbol"] for p in rest if p["value"] is None]
+        tail = {"count": len(rest),
+                "value": sum(p["value"] for p in priced),
+                "pnl": sum(p["pnl"] for p in priced),
+                "names": ", ".join(p["symbol"] for p in rest[:8])
+                         + (", …" if len(rest) > 8 else "")}
 
     held = {p["symbol"] for p in positions}
+    watch_only = []
     for (symbol, exchange) in watch:
         if symbol in held:
             continue
         v = vals(symbol, exchange)
         if v.get("price") is None:
             unavailable += 1
-            lines.append(f"⚪ {symbol} — no price this run")
+        watch_only.append({"symbol": symbol, "price": v.get("price"),
+                           "day_pct": v.get("pct_change_day"),
+                           "weak": bool(_weak_note(symbol, watch))})
+    return {"positions": shown, "tail": tail, "watch_only": watch_only,
+            "totals": totals, "unavailable": unavailable, "unpriced": unpriced}
+
+
+def text_stock_lines(report: dict) -> list[str]:
+    """The plain-text stock list (Telegram). Each number carries its own arrow
+    or word: the day's move is one thing, your profit on the stock is another,
+    and mixing their colours read as a contradiction."""
+    lines = []
+    for p in report["positions"]:
+        if p["value"] is None:
+            lines.append(f"{p['symbol']} — no price this run (you hold {p['qty']:g})")
             continue
-        lines.append(f"▪️ {symbol} {fmt.inr(v['price'])} "
-                     f"(today {fmt.move(v.get('pct_change_day'))}) — watching, "
-                     f"not held" + _weak_note(symbol, watch))
-    if unpriced:
+        lines.append(f"{p['symbol']} {fmt.inr(p['price'])} · today "
+                     f"{fmt.move(p['day_pct'])} · you hold {p['qty']:g}, "
+                     f"{'up' if p['pnl'] >= 0 else 'down'} {fmt.inr(abs(p['pnl']))} "
+                     f"({fmt.pct(p['pnl_pct'])})"
+                     + (" · ⚠️ weak fundamentals" if p.get("weak") else ""))
+    t = report.get("tail")
+    if t:
+        lines.append(f"…and {_plural(t['count'], 'smaller holding')} worth "
+                     f"{fmt.inr(t['value'])} together, "
+                     f"{'up' if t['pnl'] >= 0 else 'down'} {fmt.inr(abs(t['pnl']))} "
+                     f"overall ({t['names']})")
+    for w in report["watch_only"]:
+        if w["price"] is None:
+            lines.append(f"{w['symbol']} — no price this run")
+            continue
+        lines.append(f"{w['symbol']} {fmt.inr(w['price'])} · today "
+                     f"{fmt.move(w['day_pct'])} · watching, not held"
+                     + (" · ⚠️ weak fundamentals" if w.get("weak") else ""))
+    if report["unpriced"]:
         # these are usually broker-statement names ("NIPPON ETF JUNI.") that no
-        # exchange recognises — say so, or the ⚪ repeats forever unexplained
-        lines.append(f"⚪ no live price for {', '.join(unpriced)} — if that's a "
-                     f"broker-statement name rather than the NSE symbol, fix it "
-                     f"in the app's Portfolio tab and it'll start counting")
-    return {"lines": lines, "totals": totals, "unavailable": unavailable,
-            "unpriced": unpriced}
+        # exchange recognises — say so, or the gap repeats forever unexplained
+        lines.append(f"No live price for {', '.join(report['unpriced'])} — if "
+                     f"that's a broker-statement name rather than the NSE symbol, "
+                     f"fix it in the app's Portfolio tab and it'll start counting")
+    return lines
 
 
 def _weak_note(symbol: str, watch: dict) -> str:
@@ -236,6 +257,15 @@ def review_buckets(today: date | None = None) -> dict[str, list[str]]:
 
 # ---- the two mails -------------------------------------------------------
 
+def _dated(items: list[dict], today: date) -> list[dict]:
+    """Reminder items in the shape the HTML renderer wants."""
+    return [{"text": i["text"],
+             "when": f"was due {clock.when(i['date'], today)}"
+                     if i["date"] and i["date"] < today
+                     else (clock.when(i["date"], today) if i["date"] else "")}
+            for i in items]
+
+
 def send_daily() -> list[str]:
     if not db.get_watchlist() and not db.get_holdings():
         print("[heartbeat] nothing watched or held, nothing to send")
@@ -243,43 +273,77 @@ def send_daily() -> list[str]:
     today = clock.ist_today()
     report = money_report()
     totals = report["totals"]
-    parts = [_header("market still open, so these prices are mid-session",
-                     "after the close")]
+    head = _header("market still open, so these prices are mid-session",
+                   "after the close")
+    parts, html_blocks = [head], []
 
     block = portfolio_block(totals)
     if block:
         parts.append("\n".join(block))
-    if report["lines"]:
-        parts.append("📋 Stock by stock (🟢 = you're in profit on it, 🔴 = in "
-                     "loss, ▪️ = only watching)\n" + "\n".join(report["lines"]))
+    html_blocks.append(mailhtml.money_card(totals, fmt))
+    stock_lines = text_stock_lines(report)
+    if stock_lines:
+        parts.append("📋 Stock by stock (each number is coloured for itself: "
+                     "the day's move, then your own profit)\n"
+                     + "\n".join(stock_lines))
+        html_blocks.append(mailhtml.section(
+            "Stock by stock",
+            mailhtml.stock_rows(report["positions"], report["watch_only"],
+                                report["tail"], fmt)
+            + (mailhtml.note("No live price for "
+                             + ", ".join(report["unpriced"])
+                             + " — if that's a broker-statement name rather than "
+                               "the NSE symbol, fix it in the Portfolio tab and "
+                               "it'll start counting")
+               if report["unpriced"] else "")))
 
     fired = alerts_today_lines()
     if fired:
         parts.append("🔔 Your alerts that fired today\n" + "\n".join(fired))
+        html_blocks.append(mailhtml.section(
+            "Your alerts that fired today",
+            mailhtml.bullets([ln.lstrip("• ") for ln in fired])))
 
     rem = reminder_buckets(today)
     if rem["overdue"]:
         parts.append("⚠️ Past their date — not marked done\n"
                      + "\n".join(render_overdue(rem["overdue"], today)))
+        html_blocks.append(mailhtml.section(
+            "Past their date — not marked done",
+            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today),
+                                 "warn")
+            + (mailhtml.note(f"…and {len(rem['overdue']) - _OVERDUE_SHOWN} more "
+                             f"past their date")
+               if len(rem["overdue"]) > _OVERDUE_SHOWN else ""), "warn"))
     if rem["today"]:
         parts.append(f"📅 Set for today ({clock.short(today)}) — still open\n"
                      + "\n".join(f"• {i['text']}" for i in rem["today"]))
+        html_blocks.append(mailhtml.section(
+            f"Set for today ({clock.short(today)}) — still open",
+            mailhtml.dated_items([{"text": i["text"]} for i in rem["today"]])))
     if rem["upcoming"]:
         parts.append("📆 Coming up\n" + "\n".join(render_upcoming(rem["upcoming"], today)))
+        html_blocks.append(mailhtml.section(
+            "Coming up", mailhtml.dated_items(_dated(rem["upcoming"], today))))
 
     rev = review_buckets(today)
     if rev["overdue"] or rev["due"]:
         parts.append("⏰ Advice ledger — calls to revisit\n"
                      + "\n".join(rev["overdue"] + rev["due"]))
+        html_blocks.append(mailhtml.section(
+            "Advice ledger — calls to revisit",
+            mailhtml.bullets([ln.lstrip("• ")
+                              for ln in rev["overdue"] + rev["due"]])))
 
     n_rules = len(db.get_rules(active_only=True))
     health = "Watcher is healthy" if report["unavailable"] == 0 else \
         f"⚠️ {_plural(report['unavailable'], 'stock')} had no price this run"
-    parts.append(f"{health} · {_plural(n_rules, 'alert rule')} armed · "
-                 f"{len(fired)} fired today.\n"
-                 "(this arrives every trading day around 3:45 pm. Getting it "
-                 "means the watcher is alive, so silence from the alert "
-                 "checker really does mean nothing crossed your lines.)")
+    footer = (f"{health} · {_plural(n_rules, 'alert rule')} armed · "
+              f"{len(fired)} fired today.")
+    tail_note = ("this arrives every trading day around 3:45 pm. Getting it "
+                 "means the watcher is alive, so silence from the alert checker "
+                 "really does mean nothing crossed your lines.")
+    parts.append(f"{footer}\n({tail_note})")
 
     subject = f"📊 Stock Watcher · {clock.short(today)}"
     if totals.get("invested"):
@@ -288,7 +352,9 @@ def send_daily() -> list[str]:
                     f"{fmt.pct(totals.get('pnl_pct'))}")
     else:
         subject += " · daily digest"
-    channels = alerts.dispatch(subject, "\n\n".join(parts))
+    html_body = mailhtml.page("Stock Watcher · daily digest", head, html_blocks,
+                              f"{footer}<br>{tail_note}")
+    channels = alerts.dispatch(subject, "\n\n".join(parts), html_body=html_body)
     db.log_alert(None, "DIGEST", "-",
                  f"daily digest ({report['unavailable']} unavailable)", channels)
     print(f"[heartbeat] sent to {channels or 'no channel configured'}")
@@ -313,18 +379,29 @@ def send_morning() -> list[str]:
         drops = [f"(price tracker errored: {str(e)[:80]})"]
 
     todo = list(ipos["todo"]) + [i["text"] for i in rem["today"]]
-    body = [_header("the whole afternoon still left to act",
-                    "market's already shut, so read this as tomorrow's list")]
+    head = _header("the whole afternoon still left to act",
+                   "market's already shut, so read this as tomorrow's list")
+    body = [head]
     sections: list[str] = []
+    html_blocks: list[str] = []
 
     if todo:
         sections.append("⚡ Do today\n" + "\n".join(
             f"{n}. {t}" for n, t in enumerate(todo, 1)))
+        html_blocks.append(mailhtml.section("Do today", mailhtml.todo_cards(todo),
+                                           "act"))
     if rem["overdue"]:
         sections.append("⚠️ Past their date — deal with them or clear them\n"
                         + "\n".join(render_overdue(rem["overdue"], today)))
+        html_blocks.append(mailhtml.section(
+            "Past their date — deal with them or clear them",
+            mailhtml.dated_items(_dated(rem["overdue"][:_OVERDUE_SHOWN], today),
+                                 "warn"), "warn"))
     if rev["overdue"]:
         sections.append("⏰ Advice reviews you're late on\n" + "\n".join(rev["overdue"]))
+        html_blocks.append(mailhtml.section(
+            "Advice reviews you're late on",
+            mailhtml.bullets([ln.lstrip("• ") for ln in rev["overdue"]]), "warn"))
     if ipos["act"] or ipos["watch"] or ipos["skip"]:
         block = ["🎯 IPOs open right now"]
         if ipos["act"]:
@@ -336,13 +413,26 @@ def send_morning() -> list[str]:
             block.append(ipos["skip"])
         block.append(ipos["footer"])
         sections.append("\n".join(block))
+        keep = [r for r in ipos["rows"] if r["verdict"] != "SKIP"]
+        html_blocks.append(mailhtml.section(
+            "IPOs open right now",
+            mailhtml.ipo_rows(keep)
+            + (mailhtml.note(ipos["skip"]) if ipos["skip"] else "")))
     if drops:
         sections.append("🛒 Tracked prices moved\n" + "\n".join(drops))
+        html_blocks.append(mailhtml.section("Tracked prices moved",
+                                           mailhtml.bullets(drops)))
     if rem["upcoming"]:
         sections.append("📆 Coming up (nothing to do yet)\n"
                         + "\n".join(render_upcoming(rem["upcoming"], today)))
+        html_blocks.append(mailhtml.section(
+            "Coming up (nothing to do yet)",
+            mailhtml.dated_items(_dated(rem["upcoming"], today))))
     if rev["due"]:
         sections.append("⏰ Advice reviews due\n" + "\n".join(rev["due"]))
+        html_blocks.append(mailhtml.section(
+            "Advice reviews due",
+            mailhtml.bullets([ln.lstrip("• ") for ln in rev["due"]])))
 
     if not sections:
         print("[heartbeat] morning brief: nothing due, no open IPOs — staying quiet")
@@ -351,7 +441,12 @@ def send_morning() -> list[str]:
     subject = f"🌅 Stock Watcher · {clock.short(today)} · " + (
         f"{count} thing{'s' if count > 1 else ''} to do today" if count
         else "midday brief")
-    channels = alerts.dispatch(subject, "\n\n".join(body + sections))
+    html_body = mailhtml.page("Stock Watcher · midday brief", head, html_blocks,
+                              (ipos["footer"] + " Apply on the last day, one lot "
+                               "per PAN.") if ipos["footer"] else
+                              "Apply on the last day, one lot per PAN.")
+    channels = alerts.dispatch(subject, "\n\n".join(body + sections),
+                               html_body=html_body)
     db.log_alert(None, "DIGEST", "-", "midday brief", channels)
     print(f"[heartbeat] morning brief sent to {channels or 'no channel configured'}")
     return channels

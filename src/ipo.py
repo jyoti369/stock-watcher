@@ -282,9 +282,17 @@ def closing_phrase(row: dict, today: date | None = None) -> str:
             else f"closes {day}")
 
 
-def numbers_phrase(row: dict) -> str:
-    """'GMP 36.1% (₹180 over ₹499) · book 26.9x · big money (QIB) 12.5x'."""
+def numbers_phrase(row: dict, compact: bool = False) -> str:
+    """The three numbers that decide it. compact drops the explanations, for a
+    to-do line where the detail sits right below anyway."""
     pct = f"{row['gmp_pct']:g}%" if row.get("gmp_pct") is not None else "not quoted"
+    if compact:
+        bits = [f"premium {pct}"]
+        bits.append(f"book {row['total']:g}x" if row.get("total") is not None
+                    else "book not reported")
+        if row.get("qib") is not None:
+            bits.append(f"QIB {row['qib']:g}x")
+        return ", ".join(bits)
     bits = [f"grey-market premium {pct}"]
     if row.get("gmp") and row.get("price"):
         bits[0] += f" (₹{row['gmp']:g} over the ₹{row['price']:g} price)"
@@ -306,18 +314,24 @@ def brief(today: date | None = None) -> dict:
     """
     rows = screen()
     if not rows:
-        return {"act": [], "watch": [], "skip": None, "footer": "", "todo": []}
+        return {"act": [], "watch": [], "skip": None, "footer": "", "todo": [],
+                "rows": []}
     today = today or clock.ist_today()
     act, watch, skipped, todo = [], [], [], []
+    table = []
     for r in rows:
         kind = "SME" if r.get("sme") else "mainboard"
         head = f"{r['name']} ({kind})"
+        table.append({"name": r["name"], "kind": kind, "verdict": r["verdict"],
+                      "numbers": numbers_phrase(r),
+                      "closes": closing_phrase(r, today),
+                      "last_day": r.get("closes") == today, "why": r["why"]})
         if r["verdict"] == "APPLY-ZONE":
             act.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}")
             if r.get("closes") == today:
                 todo.append(f"Apply for {r['name']} ({kind} IPO) — today is the "
-                            f"last day, bids close at 4 pm. {numbers_phrase(r)}."
-                            f" One lot, one PAN.")
+                            f"last day, bids close at 4 pm. "
+                            f"{numbers_phrase(r, compact=True)}. One lot, one PAN.")
         elif r["verdict"] == "WATCH":
             watch.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}"
                          f"\n  {r['why']}")
@@ -325,7 +339,7 @@ def brief(today: date | None = None) -> dict:
                 bar = RULES["sme" if r.get("sme") else "mainboard"]
                 todo.append(f"Decide on {r['name']} ({kind} IPO) today — bids "
                             f"close at 4 pm. The premium clears the bar but "
-                            f"{numbers_phrase(r)}. Apply only if the book "
+                            f"{numbers_phrase(r, compact=True)}. Apply only if the book "
                             f"crosses {bar['total']:g}x with QIB over "
                             f"{bar['qib']:g}x.")
         else:
@@ -341,5 +355,7 @@ def brief(today: date | None = None) -> dict:
         skip = (f"Not worth it today ({len(skipped)}): "
                 + ", ".join(skipped[:6])
                 + (f" and {len(skipped) - 6} more" if len(skipped) > 6 else ""))
+    # the HTML mail draws its own table, so it gets the rows too — same numbers,
+    # just not pre-strung into sentences
     return {"act": act, "watch": watch, "skip": skip, "footer": footer,
-            "todo": todo}
+            "todo": todo, "rows": table}

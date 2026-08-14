@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from . import alerts, analysis, clock, datasource, db, fmt, portfolio
+from . import alerts, analysis, clock, datasource, db, fmt, mailhtml, portfolio
 from .config import CONFIG
 
 # metric key -> human label, used by the dashboard rule builder and the checker
@@ -187,42 +187,59 @@ def _holding_note(symbol: str, price: float | None) -> str:
             f"({fmt.pct(p['pnl_pct'])}) at this price.")
 
 
+def _repeat_note(rule: dict, true_since: date | None) -> str:
+    if rule.get("mode", "level") != "level":
+        return ("One-off crossing alert — it won't repeat until the level is "
+                "crossed again.")
+    since = ""
+    if true_since:
+        days = (clock.ist_today() - true_since).days + 1
+        since = (" It turned true today." if days <= 1 else
+                 f" It has been true since {clock.short(true_since)}"
+                 f" — {days} days running.")
+    return ("Standing rule: it stays true while the condition holds, so you'll "
+            "get at most one of these a day until it clears." + since
+            + " Pause it in the app's Alerts tab if it isn't telling you "
+              "anything new.")
+
+
 def alert_body(rule: dict, values: dict, reasons: list[str],
-               true_since: date | None = None) -> str:
-    """The alert mail, dated and self-explaining: what matched, what you own,
-    and why it may keep arriving."""
+               true_since: date | None = None) -> tuple[str, str]:
+    """The alert mail as (plain text, HTML).
+
+    Kept short on purpose: the price, the one line that matched, what you own,
+    and why it might arrive again. Everything else was noise.
+    """
     price, day = values.get("price"), values.get("pct_change_day")
+    label = rule.get("label") or "alert"
     head = f"{rule['symbol']} ({rule['exchange']})"
+    price_line = fmt.inr(price) if price is not None else "price unavailable"
     if price is not None:
-        head += f" — {fmt.inr(price)}"
+        head += f" — {price_line}"
         if isinstance(day, (int, float)):
             head += f", {fmt.move(day)} today"
-    out = [clock.stamp(), "", head,
-           f'Your alert "{rule.get("label") or "alert"}" just matched:']
-    out += [f"• {r}" for r in reasons]
-    gloss = [_GLOSS[c["metric"]] for c in rule.get("conditions", [])
-             if c.get("metric") in _GLOSS]
-    if gloss:
-        out += ["(" + " ".join(dict.fromkeys(gloss)) + ")"]
+    gloss = " ".join(dict.fromkeys(
+        _GLOSS[c["metric"]] for c in rule.get("conditions", [])
+        if c.get("metric") in _GLOSS))
     note = _holding_note(rule["symbol"], price)
+    repeat = _repeat_note(rule, true_since)
+
+    out = [clock.stamp(), "", head, f'Your alert "{label}" just matched:']
+    out += [f"• {r}" for r in reasons]
+    if gloss:
+        out += [f"({gloss})"]
     if note:
         out += ["", note]
-    if rule.get("mode", "level") == "level":
-        since = ""
-        if true_since:
-            days = (clock.ist_today() - true_since).days + 1
-            since = (" It turned true today." if days <= 1 else
-                     f" It has been true since {clock.short(true_since)}"
-                     f" — {days} days running.")
-        out += ["", "This is a standing rule: it stays true while the condition "
-                "holds, so you'll get at most one of these a day until it "
-                "clears." + since + " Pause it in the app's Alerts tab if it "
-                "isn't telling you anything new."]
-    else:
-        out += ["", "This is a one-off crossing alert — it won't repeat until "
-                "the level is crossed again."]
-    out += ["", "(your own rule fired this, it isn't advice — check before acting)"]
-    return "\n".join(out)
+    out += ["", repeat, "",
+            "(your own rule fired this, it isn't advice — check before acting)"]
+
+    html_body = mailhtml.page(
+        f"{rule['symbol']} · {label}", clock.stamp(),
+        [mailhtml.alert_card(rule["symbol"], rule["exchange"], label, price_line,
+                             reasons, gloss, note, repeat, fmt,
+                             day if isinstance(day, (int, float)) else None)],
+        "your own rule fired this, it isn't advice — check before acting")
+    return "\n".join(out), html_body
 
 
 def run_once(verbose: bool = True) -> list[dict]:
@@ -282,9 +299,9 @@ def run_once(verbose: bool = True) -> list[dict]:
         label = rule.get("label") or "alert"
         subject = (f"🔔 {rule['symbol']} · {label} · "
                    f"{clock.short(today)} {clock.clock_time()}")
-        body = alert_body(rule, values, reasons, true_since)
+        body, html_body = alert_body(rule, values, reasons, true_since)
 
-        channels = alerts.dispatch(subject, body)
+        channels = alerts.dispatch(subject, body, html_body=html_body)
         db.mark_triggered(rule["id"])
         db.log_alert(rule["id"], rule["symbol"], rule["exchange"], f"{label}: " + "; ".join(reasons), channels)
         fired.append({"symbol": rule["symbol"], "label": label, "reasons": reasons, "channels": channels})

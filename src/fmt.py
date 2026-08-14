@@ -16,7 +16,7 @@ GOOD, BAD, NEUTRAL = "🟢", "🔴", "▪️"
 def inr(x: float | int | None) -> str:
     """1234567.4 -> '₹12,34,567'. None -> '—'. Negatives keep the sign
     outside the symbol: '-₹1,890'."""
-    if not isinstance(x, (int, float)):
+    if not isinstance(x, (int, float)) or x != x:      # x != x catches NaN
         return "—"
     s = f"{abs(round(x)):.0f}"
     if len(s) > 3:

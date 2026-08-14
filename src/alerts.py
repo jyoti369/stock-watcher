@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import html
 import smtplib
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
@@ -33,12 +34,20 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-def send_email(subject: str, body: str) -> bool:
+def send_email(subject: str, body: str, html_body: str | None = None) -> bool:
+    """Sends multipart/alternative when an HTML body is given: clients that
+    render HTML show the laid-out version, anything else falls back to the same
+    text Telegram gets. Order matters — the HTML part must come last."""
     em = CONFIG["email"]
     if not em.get("username") or not em.get("password") or not em.get("to"):
         return False
     try:
-        msg = MIMEText(body, "plain", "utf-8")
+        if html_body:
+            msg = MIMEMultipart("alternative")
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+            msg.attach(MIMEText(html_body, "html", "utf-8"))
+        else:
+            msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"] = em["username"]
         msg["To"] = em["to"]
@@ -52,9 +61,11 @@ def send_email(subject: str, body: str) -> bool:
         return False
 
 
-def dispatch(subject: str, body: str, channels: list[str] | None = None) -> list[str]:
+def dispatch(subject: str, body: str, channels: list[str] | None = None,
+             html_body: str | None = None) -> list[str]:
     """Send to the requested channels (default: configured ones). Returns the
-    channels that actually succeeded."""
+    channels that actually succeeded. `body` is the plain-text version — it
+    always goes to Telegram, which has no HTML layout worth the name."""
     channels = channels or CONFIG["alerts"]["channels"]
     sent = []
     # Telegram parses the message as HTML, so anything in the text that looks
@@ -63,7 +74,7 @@ def dispatch(subject: str, body: str, channels: list[str] | None = None) -> list
     if "telegram" in channels and send_telegram(
             f"<b>{html.escape(subject)}</b>\n{html.escape(body)}"):
         sent.append("telegram")
-    if "email" in channels and send_email(subject, body):
+    if "email" in channels and send_email(subject, body, html_body):
         sent.append("email")
     return sent
 

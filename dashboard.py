@@ -38,22 +38,59 @@ SUGG_CACHE = DATA_DIR / "suggestions_cache.pkl"
 st.set_page_config(page_title="Stock Watcher", page_icon="📈", layout="wide")
 
 # --- update feel -----------------------------------------------------------
-# Streamlit's default is to grey out the whole page and spin a "running" badge
-# on every rerun, which makes a one-tap checkbox look like a page load. Modern
-# apps update in place instead. Two halves to that: heavy writes moved off the
-# click path (see auto_sync below) and this, which stops the visual flicker —
-# stale content stays fully visible and readable while the new value arrives.
+# Streamlit's default is to grey out the whole page on every rerun, which makes
+# a one-tap checkbox look like a page load. So stale content stays fully
+# visible and readable while the new value arrives.
+#
+# What it must NOT do is hide the fact that something is happening — this used
+# to also hide stStatusWidget, and with no spinner and no grey-out a slow tap
+# looked like the app had ignored you. The badge is back, restyled as a small
+# "working" pill, and slow paths below get their own inline spinner or a
+# shimmer placeholder so the waiting is visible where the data will appear.
 st.markdown("""
 <style>
-  [data-testid="stStatusWidget"] { display: none !important; }
   [data-testid="stAppDeployButton"] { display: none !important; }
   .stApp [data-stale="true"], .stApp .element-container[data-stale="true"] {
       opacity: 1 !important; transition: none !important; filter: none !important; }
   [data-testid="stAppViewContainer"] { transition: none !important; }
+  /* the running badge: small, calm, and unmistakably "busy" */
+  [data-testid="stStatusWidget"] {
+      background: rgba(23,163,152,.14) !important; border: 1px solid #17a398 !important;
+      border-radius: 20px !important; padding: 2px 10px 2px 6px !important;
+      box-shadow: none !important; }
+  [data-testid="stStatusWidget"] label, [data-testid="stStatusWidget"] div {
+      color: #17a398 !important; font-size: .8rem !important; }
   /* toasts read as the confirmation, so make them easy to catch */
   [data-testid="stToast"] { font-size: 0.95rem; }
+  /* shimmer used by skeleton() while a slow block is being fetched */
+  .sw-shimmer { border-radius: 6px; margin: 7px 0;
+      background: linear-gradient(90deg, rgba(148,163,184,.10) 25%,
+        rgba(148,163,184,.28) 37%, rgba(148,163,184,.10) 63%);
+      background-size: 400% 100%; animation: sw-sweep 1.2s ease-in-out infinite; }
+  @keyframes sw-sweep { 0% { background-position: 100% 0 }
+                        100% { background-position: 0 0 } }
 </style>
 """, unsafe_allow_html=True)
+
+
+def skeleton(rows: int = 5, head: bool = True) -> str:
+    """Shimmer bars shaped like the content that's coming.
+
+    Used with a placeholder so the wait shows up exactly where the data will
+    land, instead of a spinner somewhere else on the page:
+
+        ph = st.empty()
+        ph.markdown(skeleton(6), unsafe_allow_html=True)
+        rows = slow_fetch()
+        ph.empty()
+    """
+    bars = []
+    if head:
+        bars.append('<div class="sw-shimmer" style="height:26px;width:38%"></div>')
+    for i in range(rows):
+        bars.append(f'<div class="sw-shimmer" style="height:16px;'
+                    f'width:{[100, 92, 96, 88, 94][i % 5]}%"></div>')
+    return "".join(bars)
 
 
 def _require_password() -> None:
@@ -104,6 +141,12 @@ PERIODS = {"3 months": 0.25, "6 months": 0.5, "1 year": 1.0, "3 years": 3.0, "5 
 
 
 def inr(v) -> str:
+    return fmt.inr(v)
+
+
+def _rupees(v) -> str:
+    """Rupee formatter for dataframe columns — same Indian grouping as
+    everywhere else, so one screen never shows ₹1,32,168 and ₹132,168."""
     return fmt.inr(v)
 
 
@@ -174,11 +217,19 @@ def auto_sync() -> None:
     threading.Thread(target=_push_worker, daemon=True).start()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _sim(symbol: str, exchange: str, years: float, amount: float) -> dict | None:
+    """3,000 simulated paths — cached, so nudging the amount doesn't re-run the
+    whole thing (and the fetch behind it) on every keystroke."""
+    return projection.monte_carlo(datasource.get_history(symbol, exchange),
+                                  years, amount)
+
+
 def monte_carlo_block(symbol, exchange, years, amount, period_label):
     """Shared probability-range renderer. Plain-first: the odds verdict leads,
     the quant labels ride along in brackets so users learn the terms."""
-    hist = datasource.get_history(symbol, exchange)
-    mc = projection.monte_carlo(hist, years, amount)
+    with st.spinner("Running the projection…"):
+        mc = _sim(symbol, exchange, years, amount)
     if not mc:
         st.caption("Not enough price history for a projection.")
         return
@@ -210,52 +261,65 @@ with st.sidebar:
     st.title("📈 Stock Watcher")
     st.caption("Indian equities · NSE / BSE · free data")
 
-    with st.expander("➕ Add to watchlist", expanded=True):
+    # Order is deliberate: the two buttons you reach for most sit at the top,
+    # where they're reachable on a phone without scrolling a drawer. Adding a
+    # symbol is occasional, so it's collapsed below them.
+    if st.button("🔄 Refresh prices now", width="stretch",
+                 help="Data is cached ~15 min. This clears it and refetches."):
+        with st.spinner("Clearing caches…"):
+            datasource._CACHE.clear()
+            st.cache_data.clear()
+        st.toast("Cleared cache — pulling fresh data")
+        st.rerun()
+
+    if st.button("🔔 Run alert check now", width="stretch",
+                 help="Checks every active rule right now and notifies if one matches."):
+        with st.spinner("Checking your rules against live prices…"):
+            fired = watcher.run_once(verbose=False)
+        st.toast(f"{len(fired)} alert(s) fired" if fired else "Checked — nothing triggered")
+
+    with st.expander("➕ Add to watchlist"):
         with st.form("add_symbol", clear_on_submit=True):
             new_sym = st.text_input("Symbol", placeholder="TCS, INFY, RELIANCE…").strip().upper()
             new_exch = st.selectbox("Exchange", ["NSE", "BSE"])
             if st.form_submit_button("Add", width="stretch") and new_sym:
-                db.add_to_watchlist(new_sym, new_exch, datasource.resolve_name(new_sym, new_exch))
-                auto_sync()
+                with st.spinner(f"Looking up {new_sym}…"):
+                    name = datasource.resolve_name(new_sym, new_exch)
+                    db.add_to_watchlist(new_sym, new_exch, name)
+                    auto_sync()
                 st.toast(f"Added {new_sym}")
                 st.rerun()
 
     st.divider()
-    st.caption("**Notifications**")
-    for ch, ok in alerts.channel_status().items():
-        st.write(f"{'🟢' if ok else '⚪'} {ch}{'' if ok else ' · off'}")
-    if st.button("🔔 Run alert check now", width="stretch"):
-        fired = watcher.run_once(verbose=False)
-        st.toast(f"{len(fired)} alert(s) fired" if fired else "Checked — nothing triggered")
+    # one line, not one row per channel — this status almost never changes
+    _ch = alerts.channel_status()
+    _on = [c for c, ok in _ch.items() if ok]
+    st.caption(f"🔔 Alerts go to **{' + '.join(_on)}**" if _on else
+               "⚪ No notification channel configured yet")
 
-    if st.button("🔄 Refresh data now", width="stretch"):
-        datasource._CACHE.clear()
-        st.cache_data.clear()
-        st.toast("Cleared cache — pulling fresh data")
-        st.rerun()
-    st.caption("Data caches ~15 min; refresh to force fresh prices/fundamentals.")
-
-    if st.button("⬆️ Sync watchlist/rules to GitHub", width="stretch"):
-        st.session_state["_autosync_dead"] = False
-        with st.spinner("Pushing…"):
-            ok, msg = sync_to_github()
-            if not ok and gh_sync.available():
-                ok, msg = gh_sync.push_state()
-        _sync_status.update(state="ok" if ok else "failed", msg=msg)
-        st.toast(("✅ " if ok else "⚠️ ") + msg)
     _ss = _sync_status.get("state")
     if _ss == "syncing":
         st.caption("🔄 Saving to GitHub in the background…")
     elif _ss == "failed":
         st.caption(f"⚠️ Last sync failed: {_sync_status.get('msg', '')[:80]} — "
-                   "changes are saved locally; hit the button to retry.")
+                   "changes are saved locally; hit retry below.")
     elif _ss == "ok":
         st.caption(f"🟢 Saved to GitHub · {_sync_status.get('msg', '')[:60]}")
     elif gh_sync.available():
         st.caption("🟢 Changes auto-save to GitHub (works from your phone too).")
     else:
-        st.caption("Auto-sync works locally via git. To make changes from the hosted app "
-                   "stick too, add a STOCKWATCH_GH_TOKEN secret (see DEPLOY.md).")
+        st.caption("🟢 Changes save here and push via git. For edits made on the "
+                   "hosted app to stick too, add a STOCKWATCH_GH_TOKEN secret "
+                   "(see DEPLOY.md).")
+    if st.button("⬆️ Save to GitHub now", width="stretch",
+                 help="Changes already save on their own; use this to retry a failed sync."):
+        st.session_state["_autosync_dead"] = False
+        with st.spinner("Pushing to GitHub…"):
+            ok, msg = sync_to_github()
+            if not ok and gh_sync.available():
+                ok, msg = gh_sync.push_state()
+        _sync_status.update(state="ok" if ok else "failed", msg=msg)
+        st.toast(("✅ " if ok else "⚠️ ") + msg)
 
 
 def _warm_caches(pairs: list[tuple[str, str]]) -> None:
@@ -475,9 +539,19 @@ def advisor_fragment() -> None:
 
 
 watchlist = db.get_watchlist()
+# First load of a session pulls every symbol in parallel and can take a few
+# seconds; say so instead of showing an empty page.
+_warm_ph = st.empty()
+if not st.session_state.get("_warmed"):
+    _warm_ph.markdown(f'<div style="padding:4px 0 10px">'
+                      f'<div style="font:400 14px/1.6 system-ui;color:#94a3b8">'
+                      f'Pulling live prices for your stocks…</div>{skeleton(3)}</div>',
+                      unsafe_allow_html=True)
 _warm_caches([(w["symbol"], w["exchange"]) for w in watchlist]
              + [(h["symbol"], h["exchange"]) for h in db.get_holdings()]
              + [(r["symbol"], r["exchange"]) for r in db.get_rules(active_only=False)])
+st.session_state["_warmed"] = True
+_warm_ph.empty()
 tabs = st.tabs(["📋 Overview", "💼 Portfolio", "💡 Suggestions",
                 "🔍 Stock analysis", "🔔 Alerts", "🗺️ Plan", "🧭 Advice",
                 "💬 Advisor", "🎯 IPO", "🛒 Buy"])
@@ -489,6 +563,8 @@ with tabs[0]:
         st.info("Watchlist is empty — add a symbol from the sidebar (try TCS, INFY, RELIANCE).")
     else:
         rows = []
+        _ov_ph = st.empty()
+        _ov_ph.markdown(skeleton(len(watchlist)), unsafe_allow_html=True)
         for w in watchlist:
             v = watcher.gather_values(w["symbol"], w["exchange"])
             s = analysis.score_fundamentals(w["symbol"], w["exchange"])   # light = fast
@@ -507,12 +583,15 @@ with tabs[0]:
 
         styled = (df.style
                   .map(_pct_color, subset=["Day %", "1Y %"])
-                  .format({"Price": "₹{:,.2f}", "Day %": "{:+.2f}%", "1Y %": "{:+.1f}%",
+                  .format({"Price": _rupees, "Day %": "{:+.1f}%", "1Y %": "{:+.1f}%",
                            "P/E": "{:.1f}", "ROE %": "{:.1f}%", "RSI": "{:.0f}"}, na_rep="—"))
+        _ov_ph.empty()
         st.dataframe(styled, width="stretch", hide_index=True)
         st.caption("**Health** = share of fundamental checks passed: 65+ 🟢 OK · 40–64 🟡 Mixed · "
-                   "<40 🔴 Weak — about the business, not the price. Open **Stock analysis** for "
-                   "the deep view + bottom line. Prices via NSE live where available, else ~15-min delayed.")
+                   "<40 🔴 Weak — about the business, not the price. **RSI** is a 0–100 momentum "
+                   "gauge (under 30 = heavily sold off, over 70 = heavily bought). **P/E** = price "
+                   "÷ a year's profit per share. Open **Stock analysis** for the deep view + bottom "
+                   "line. Prices via NSE live where available, else ~15-min delayed.")
 
         with st.expander("⚙️ Manage watchlist"):
             for w in watchlist:
@@ -629,6 +708,8 @@ with tabs[1]:
                 "each stock's health at a glance.")
     else:
         lot_rows, rows = [], []
+        _pf_ph = st.empty()
+        _pf_ph.markdown(skeleton(min(len(holdings), 8)), unsafe_allow_html=True)
         for h in holdings:
             v = watcher.gather_values(h["symbol"], h["exchange"])
             s = analysis.score_fundamentals(h["symbol"], h["exchange"])
@@ -643,16 +724,22 @@ with tabs[1]:
             })
 
         tot = portfolio.totals(lot_rows)
+        _pf_ph.empty()
         t1, t2, t3, t4 = st.columns(4)
-        t1.metric("Invested", inr(tot["invested"]))
-        t2.metric("Current value", inr(tot["value"]),
-                  f"{tot['pnl_pct']:+.1f}%" if tot["pnl_pct"] is not None else None)
-        t3.metric("Total P&L", inr(tot["pnl"]), "profit" if tot["pnl"] >= 0 else "loss")
-        t4.metric("Today", inr(tot["day_move"]),
-                  f"{tot['day_pct']:+.2f}%" if tot["day_pct"] is not None else None)
+        t1.metric("You put in", inr(tot["invested"]))
+        t2.metric("Worth now", inr(tot["value"]), fmt.pct(tot["pnl_pct"])
+                  if tot["pnl_pct"] is not None else None)
+        t3.metric("Profit / loss", inr(tot["pnl"]),
+                  "in profit" if tot["pnl"] >= 0 else "in loss")
+        t4.metric("Today", inr(tot["day_move"]), fmt.pct(tot["day_pct"])
+                  if tot["day_pct"] is not None else None)
         if tot["missing"]:
-            st.warning(f"{tot['missing']} holding(s) had no live price this run — totals "
-                       "exclude them. Hit 🔄 Refresh data in the sidebar.")
+            n = tot["missing"]
+            st.warning(f"{n} holding{'' if n == 1 else 's'} had no live price this "
+                       f"run, so the totals leave {'it' if n == 1 else 'them'} out. "
+                       f"A broker-statement name like “NIPPON ETF JUNI.” never "
+                       f"prices — replace it with the NSE symbol below. Otherwise "
+                       f"hit 🔄 Refresh prices in the sidebar.")
 
         pdf = pd.DataFrame(rows)
 
@@ -663,9 +750,10 @@ with tabs[1]:
 
         st.dataframe(
             pdf.style.map(_pl_color, subset=["Day %", "P&L", "P&L %"])
-               .format({"Qty": "{:g}", "Buy ₹": "₹{:,.2f}", "Now ₹": "₹{:,.2f}",
-                        "Day %": "{:+.2f}%", "Invested": "₹{:,.0f}", "Value": "₹{:,.0f}",
-                        "P&L": "₹{:+,.0f}", "P&L %": "{:+.1f}%"}, na_rep="—"),
+               .format({"Qty": "{:g}", "Buy ₹": _rupees, "Now ₹": _rupees,
+                        "Day %": "{:+.1f}%", "Invested": _rupees, "Value": _rupees,
+                        "P&L": lambda v: fmt.signed_inr(v), "P&L %": "{:+.1f}%"},
+                       na_rep="—"),
             width="stretch", hide_index=True)
         st.caption("P&L is vs your buy price (dividends not counted). Health = the business "
                    "quality read — open **Stock analysis** for the full picture + bottom line.")
@@ -673,8 +761,9 @@ with tabs[1]:
         with st.expander("⚙️ Manage holdings"):
             for h in holdings:
                 c1, c2 = st.columns([4, 1])
-                bd = f" · bought {h['buy_date']}" if h.get("buy_date") else ""
-                c1.write(f"{h['qty']:g} × **{h['symbol']}** @ ₹{h['buy_price']:g}{bd}")
+                bd = f" · bought {advice.pretty_date(h['buy_date'])}" \
+                    if h.get("buy_date") else ""
+                c1.write(f"{h['qty']:g} × **{h['symbol']}** @ {inr(h['buy_price'])}{bd}")
                 if c2.button("Remove", key=f"rmh_{h['id']}"):
                     db.remove_holding(h["id"])
                     auto_sync()
@@ -700,20 +789,31 @@ with tabs[1]:
                 "into the AI import.")
     else:
         vrows, missing_nav = [], 0
+        _mf_ph = st.empty()
+        _mf_ph.markdown(skeleton(min(len(mf_rows), 6)), unsafe_allow_html=True)
         for h in mf_rows:
+            # each miss is a 12s AMFI timeout, so this block can be genuinely
+            # slow the first time in a session — hence the shimmer above
             nav = _nav(str(h["code"])) if h.get("code") else None
             if h.get("code") and nav is None:
                 missing_nav += 1
             vrows.append(mf.value_row(h, nav))
+        _mf_ph.empty()
         tot_val = sum(r["value"] for r in vrows if r["value"])
         tot_inv = sum(r["invested"] for r in vrows if r["invested"])
         live_n = sum(1 for r in vrows if r["source"].startswith("live"))
         m1, m2, m3 = st.columns(3)
-        m1.metric("MF value", inr(tot_val))
-        m2.metric("Priced live (AMFI)", f"{live_n}/{len(vrows)} funds")
-        m3.metric("Awaiting units/cost", f"{len(vrows) - live_n} rows")
+        m1.metric("Funds worth", inr(tot_val),
+                  help="Units × today's official AMFI NAV")
+        m2.metric("Priced from AMFI", f"{live_n} of {len(vrows)}",
+                  help="Funds where we found today's published NAV")
+        m3.metric("Still estimates", f"{len(vrows) - live_n}",
+                  help="Rows missing units or cost — fill them in from your CAS "
+                       "statement and they turn into real numbers")
         if missing_nav:
-            st.warning(f"{missing_nav} fund(s) had no NAV this run — showing estimates.")
+            st.warning(f"{missing_nav} fund{'' if missing_nav == 1 else 's'} had no "
+                       f"NAV this run — showing estimates for "
+                       f"{'it' if missing_nav == 1 else 'them'}.")
         def _mf_color(x):
             if isinstance(x, (int, float)) and not pd.isna(x):
                 return "color: #4ade80" if x > 0 else "color: #fb7185" if x < 0 else ""
@@ -727,9 +827,9 @@ with tabs[1]:
         } for r in vrows])
         st.dataframe(
             mdf.style.map(_mf_color, subset=["P&L", "P&L %"])
-               .format({"Units": "{:,.3f}", "NAV ₹": "₹{:,.2f}", "Value": "₹{:,.0f}",
-                        "Invested": "₹{:,.0f}", "P&L": "₹{:+,.0f}", "P&L %": "{:+.1f}%"},
-                       na_rep="—"),
+               .format({"Units": "{:,.3f}", "NAV ₹": "₹{:,.2f}", "Value": _rupees,
+                        "Invested": _rupees, "P&L": lambda v: fmt.signed_inr(v),
+                        "P&L %": "{:+.1f}%"}, na_rep="—"),
             width="stretch", hide_index=True)
         st.caption("P&L needs the invested amount — rows without it show value only. "
                    "The monthly CAS statement (CAMS/KFintech email) has exact units for "
@@ -739,7 +839,13 @@ with tabs[1]:
         with st.expander("➕ Add a fund (AMFI search)"):
             q = st.text_input("Scheme name", placeholder="parag parikh flexi",
                               key="mf_q")
-            hits = mf.search_schemes(q) if len(q.strip()) >= 4 else []
+
+            # cached, or every keystroke fires a fresh 12s-timeout AMFI lookup
+            @st.cache_data(ttl=3600, show_spinner="Searching AMFI schemes…")
+            def _mf_search(term: str):
+                return mf.search_schemes(term)
+
+            hits = _mf_search(q.strip()) if len(q.strip()) >= 4 else []
             if q.strip() and not hits:
                 st.caption("No match — try fewer/simpler words (the AMFI search is "
                            "picky, e.g. 'hdfc mid cap' not 'HDFC Mid-Cap Opportunities').")
@@ -829,7 +935,13 @@ with tabs[2]:
     universe_choice = c1.radio("Scan", ["Popular large-caps", "My watchlist", "Both"])
     period_label = c2.selectbox("Holding period", list(PERIODS.keys()), index=2)
     amount = c3.number_input("Amount (₹)", min_value=1000, value=100000, step=10000)
-    top_n = c4.slider("Show", 3, 10, 5)
+    # labelled "Deep-check" not "Show": it decides how many get the expensive
+    # second pass at scan time, so changing it after a scan does nothing until
+    # you scan again
+    top_n = c4.slider("Deep-check", 3, 10, 5,
+                      help="How many of the top-ranked stocks get the full "
+                           "statements/peers/bear-case pass. Takes effect on the "
+                           "next scan.")
     years = PERIODS[period_label]
 
     if st.button("🔍 Find suggestions", type="primary"):
@@ -841,8 +953,13 @@ with tabs[2]:
         if not uni:
             st.warning("Your watchlist is empty — pick 'Popular large-caps' or 'Both'.")
         else:
-            with st.spinner(f"Scoring {len(set(uni))} stocks, then deep-checking the top {top_n}…"):
+            # a scan is 30-60s of sequential fetches; a bare spinner that long
+            # reads as a hang, so say which stage it's in
+            with st.status(f"Scanning {len(set(uni))} stocks…", expanded=True) as _sc:
+                st.write(f"Ranking all {len(set(uni))} on a quick read…")
                 ranked_now = suggestions.rank(uni, top_n=top_n)
+                st.write(f"Deep-checking the top {top_n} (statements, peers, "
+                         f"valuation)…")
                 st.session_state["suggestions"] = ranked_now
                 st.session_state["suggestions_ts"] = datetime.now().strftime("%d %b %Y, %H:%M")
                 try:                       # persist so the next visit is instant
@@ -851,6 +968,9 @@ with tabs[2]:
                         {"ts": st.session_state["suggestions_ts"], "rows": ranked_now}))
                 except Exception:
                     pass
+                st.write("Saving this scan to history…")
+                _sc.update(label=f"Scanned {len(set(uni))} stocks", state="complete",
+                           expanded=False)
                 # append to the permanent scan history (with stance one-liners)
                 try:
                     stances = {r["symbol"]: verdict.build(
@@ -1018,11 +1138,20 @@ with tabs[3]:
         picked_sym, picked_exch = st.selectbox("Or pick from watchlist", options).split(" · ")
 
     if picked_sym:
+        # the deep read is five separate pulls (statements, 5y history, peers) and
+        # is the slowest thing in the app on a cold cache — show the wait here,
+        # shaped like the page that's coming
+        _an_ph = st.empty()
+        _an_ph.markdown(
+            f'<div style="font:400 14px/1.6 system-ui;color:#94a3b8">'
+            f'Reading {picked_sym}: statements, 5-year history, peers…</div>'
+            f'{skeleton(7)}', unsafe_allow_html=True)
         score = analysis.score_fundamentals(picked_sym, picked_exch, deep=True)
         vals = watcher.gather_values(picked_sym, picked_exch)
         hist = datasource.get_history(picked_sym, picked_exch)
         val = bearcase.valuation_percentile(picked_sym, picked_exch)
         peer = sectors.peer_comparison(picked_sym, picked_exch)
+        _an_ph.empty()
 
         st.markdown(f"### {score.get('name', picked_sym)}  ·  {picked_sym}")
         if score.get("sector"):
@@ -1124,7 +1253,8 @@ with tabs[3]:
                 st.caption("vs peers: " + "; ".join(peer["verdict"].values()) + ".")
 
         # bear case
-        bear = bearcase.bear_case(picked_sym, picked_exch)
+        with st.spinner("Checking what could go wrong…"):
+            bear = bearcase.bear_case(picked_sym, picked_exch)
         st.markdown("**⚠️ Bear case — what could go wrong**")
         for f in bear["flags"]:
             st.write(f"• {f}")
@@ -1177,7 +1307,8 @@ with tabs[3]:
                  "buys · Golden cross = when the 50-day average crosses above the 200-day (a trend "
                  "turning up). If the 'avg after signal' beats the any-day average with a high win "
                  "rate, the signal has had an edge on this stock.")
-        bt = projection.backtest(hist, sig)
+        with st.spinner(f"Replaying “{sig}” across this stock's history…"):
+            bt = projection.backtest(hist, sig)
         if bt:
             st.write(f"Fired **{bt['num_signals']}** times over ~{bt['years']}y. "
                      "Average return AFTER the signal vs buying on any random day:")
@@ -1407,15 +1538,16 @@ with tabs[6]:
         # arm every exit band as a watcher alert, idempotently
         ac1, ac2 = st.columns([1, 3])
         if ac1.button("🔔 Arm all exit alerts", key="adv_arm"):
-            wanted = advice.alert_rules_from(open_calls)
-            for r in db.get_rules(active_only=False):
-                if advice.is_advice_rule(r.get("label")):
-                    db.delete_rule(r["id"])
-            for w in wanted:
-                db.add_rule(w["symbol"], w["exchange"], w["label"],
-                            w["conditions"], mode=w["mode"])
-            repo_state.export_config()
-            auto_sync()
+            with st.spinner("Rewriting the exit alerts…"):
+                wanted = advice.alert_rules_from(open_calls)
+                for r in db.get_rules(active_only=False):
+                    if advice.is_advice_rule(r.get("label")):
+                        db.delete_rule(r["id"])
+                for w in wanted:
+                    db.add_rule(w["symbol"], w["exchange"], w["label"],
+                                w["conditions"], mode=w["mode"])
+                repo_state.export_config()
+                auto_sync()
             st.toast(f"Armed {len(wanted)} exit alert(s) in the watcher")
             st.rerun()
         ac2.caption("Creates/refreshes watcher price alerts from every open call's "
@@ -1601,9 +1733,17 @@ with tabs[9]:
         def _shop_cached(query: str, max_price, bucket: str):
             return shop.advise(query, max_price)
 
-        with st.spinner(f"Searching the stores for “{q}” (up to ~1 min)…"):
+        # this one really does take up to ~90s (three stores, retries, polite
+        # sleeps), so it gets a staged status rather than a spinner that looks
+        # like the app died
+        with st.status(f"Searching for “{q}”…", expanded=True) as _sh:
+            st.write("Asking Amazon, Flipkart and Myntra… (up to ~1 min, they "
+                     "throttle rapid requests)")
             found = _shop_cached(q, cap, datetime.now().strftime("%Y%m%d%H")
                                  + str(datetime.now().minute // 30))
+            st.write(f"Scoring {len(found)} listings that matched your words…")
+            _sh.update(label=f"Found {len(found)} listings for “{q}”",
+                       state="complete", expanded=False)
         srcs = {r["source"] for r in found}
         missing = [s for s in ("Amazon", "Flipkart", "Myntra")
                    if s not in srcs]

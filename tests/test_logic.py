@@ -675,6 +675,46 @@ def test_portfolio_block_wording():
     assert heartbeat.portfolio_block({}) == []          # nothing owned, no block
 
 
+def test_html_mail_colours_each_number_for_itself():
+    from src import fmt, mailhtml
+
+    # ICICIBANK: UP today, but your position is in loss. The day's move must be
+    # green and the position red — one leading red dot for both read as "the
+    # stock is down today", which it isn't.
+    rows = mailhtml.stock_rows(
+        [{"symbol": "ICICIBANK", "price": 1417.0, "day_pct": 0.7, "qty": 3,
+          "value": 4251.0, "pnl": -68.0, "pnl_pct": -1.6}],
+        [], None, fmt)
+    def colour_of(needle: str) -> str:
+        """The colour declared on the span that prints this number."""
+        head = rows[:rows.index(needle)]
+        return head[head.rindex("color:"):][6:13]
+    assert colour_of("+0.7%") == mailhtml.GREEN     # today was up
+    assert colour_of("-1.6%") == mailhtml.RED       # the position is in loss
+    assert "🔺" in rows and "down ₹68" in rows
+
+    # a no-price holding says so instead of showing a zero
+    blank = mailhtml.stock_rows([{"symbol": "ITC", "price": None, "day_pct": None,
+                                  "qty": 20, "value": None, "pnl": None,
+                                  "pnl_pct": None}], [], None, fmt)
+    assert "no price" in blank and "you hold 20" in blank
+
+    card = mailhtml.money_card({"invested": 149244, "value": 132168,
+                                "day_move": -1544.0, "day_pct": -1.16,
+                                "pnl": -8394.0, "pnl_pct": -5.62, "missing": 0}, fmt)
+    assert "₹1,32,168" in card and "-₹1,544" in card and mailhtml.RED in card
+    assert mailhtml.money_card({}, fmt) == ""
+
+    # anything interpolated is escaped — a company name with an ampersand or a
+    # stray bracket must not become markup
+    danger = mailhtml.ipo_rows([{"name": 'Q&T <b>Foods', "kind": "SME",
+                                 "verdict": "SKIP", "numbers": "premium 0.9%",
+                                 "closes": "closes today", "last_day": True}])
+    assert "Q&amp;T &lt;b&gt;Foods" in danger and "<b>Foods" not in danger
+    full = mailhtml.page("T&C", "sub <x>", [card], "foot & note")
+    assert "T&amp;C" in full and "sub &lt;x&gt;" in full
+
+
 def test_ipo_brief_groups_by_action(monkeypatch):
     from datetime import timedelta
     from src import clock, ipo
@@ -740,23 +780,28 @@ def test_alert_body_plain_language(monkeypatch):
     assert reasons == ["the gap between price and its 200-day average is -11.2% "
                        "— under your -10.0% line"]
 
-    body = watcher.alert_body(rule, values, reasons,
-                              clock.ist_today() - timedelta(days=2))
+    body, html_body = watcher.alert_body(rule, values, reasons,
+                                         clock.ist_today() - timedelta(days=2))
     assert clock.stamp()[:12] in body                  # dated, always
     assert "₹1,169" in body and "🔻 -0.5% today" in body
     assert "You hold 6 shares at ₹1,455 average" in body
     assert "-₹1,716" in body                           # what it costs you today
+    assert "3 days running" in body                    # explains the repeat
+    assert "Pause it" in body
+    # the HTML part says the same things, and colours each number for itself
+    assert "₹1,169" in html_body and "-₹1,716" in html_body
+    assert "below 200dma dip" in html_body and "3 days running" in html_body
+    assert html_body.count("<script") == 0
+
+    fresh, _ = watcher.alert_body(rule, values, reasons, clock.ist_today())
+    assert "turned true today" in fresh and "days running" not in fresh
+    # a crossing alert must not claim it will repeat daily
+    edge, _ = watcher.alert_body({**rule, "mode": "edge"}, values, reasons)
+    assert "One-off crossing" in edge and "running" not in edge
     # a missing holdings store must not stop the alert going out
     monkeypatch.setattr(watcher.db, "get_holdings",
                         lambda: (_ for _ in ()).throw(RuntimeError("no db")))
-    assert "just matched" in watcher.alert_body(rule, values, reasons)
-    assert "3 days running" in body                    # explains the repeat
-    assert "Pause it" in body
-    fresh = watcher.alert_body(rule, values, reasons, clock.ist_today())
-    assert "turned true today" in fresh and "days running" not in fresh
-    # a crossing alert must not claim it will repeat daily
-    edge = watcher.alert_body({**rule, "mode": "edge"}, values, reasons)
-    assert "one-off crossing" in edge and "running" not in edge
+    assert "just matched" in watcher.alert_body(rule, values, reasons)[0]
 
 
 def test_level_rule_mails_once_a_day(monkeypatch):
@@ -787,7 +832,8 @@ def test_level_rule_mails_once_a_day(monkeypatch):
     monkeypatch.setattr(watcher, "gather_values",
                         lambda s, e: {"price": 1169.0, "pct_change_day": -0.5})
     monkeypatch.setattr(watcher.alerts, "dispatch",
-                        lambda s, b, channels=None: sent.append(s) or ["email"])
+                        lambda s, b, channels=None, html_body=None:
+                        sent.append((s, html_body)) or ["email"])
 
     monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [rule])
     assert watcher.run_once(verbose=False) == [] and sent == []
@@ -797,7 +843,8 @@ def test_level_rule_mails_once_a_day(monkeypatch):
         timezone.utc).isoformat()}
     monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [stale])
     assert len(watcher.run_once(verbose=False)) == 1
-    assert sent and sent[0].startswith("🔔 INFY · dip · ")
+    assert sent and sent[0][0].startswith("🔔 INFY · dip · ")
+    assert "<table" in sent[0][1]          # the mail carries an HTML part too
 
 
 def test_shop_judge_and_parse():
