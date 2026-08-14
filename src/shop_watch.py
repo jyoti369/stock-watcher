@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import date
 
+from . import clock
 from .repo_state import STATE_DIR, _fernet
 
 WATCH_JSON = STATE_DIR / "shop_watch.json"
@@ -53,9 +53,9 @@ def add(title: str, url: str, source: str, price: float | None,
     if any(r["url"] == url for r in rows):
         return True                                   # already tracked
     item = {"title": title[:90], "url": url, "source": source,
-            "added": date.today().isoformat(), "history": []}
+            "added": clock.ist_today().isoformat(), "history": []}
     if price:
-        item["history"].append({"d": date.today().isoformat(), "p": price})
+        item["history"].append({"d": clock.ist_today().isoformat(), "p": price})
     if target:
         item["target"] = target
     rows.append(item)
@@ -86,7 +86,7 @@ def check_all(fetch=None, today: str | None = None) -> tuple[list[dict], list[st
     if fetch is None:
         from .shop import current_price as fetch
     rows = load() or []
-    today = today or date.today().isoformat()
+    today = today or clock.ist_today().isoformat()
     alerts = []
     for item in rows:
         prev = item["history"][-1]["p"] if item.get("history") else None

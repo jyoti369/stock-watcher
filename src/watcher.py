@@ -237,6 +237,11 @@ def alert_body(rule: dict, values: dict, reasons: list[str],
     label = rule.get("label") or "alert"
     head = f"{rule['symbol']} ({rule['exchange']})"
     price_line = fmt.inr(price) if price is not None else "price unavailable"
+    # the watcher also runs pre-open and just after the close, where "the price"
+    # is the last trade of a finished session — say so rather than implying live
+    market = clock.market_status()
+    stale_note = "" if market["open"] else f"({market['label'].split(' · ')[0]} — "\
+                                           f"this is the last traded price)"
     if price is not None:
         head += f" — {price_line}"
         if isinstance(day, (int, float)):
@@ -247,7 +252,10 @@ def alert_body(rule: dict, values: dict, reasons: list[str],
     note = _holding_note(rule["symbol"], price)
     repeat = _repeat_note(rule, true_since)
 
-    out = [clock.stamp(), "", head, f'Your alert "{label}" just matched:']
+    out = [clock.stamp(), "", head]
+    if stale_note:
+        out += [stale_note]
+    out += [f'Your alert "{label}" just matched:']
     out += [f"• {r}" for r in reasons]
     if gloss:
         out += [f"({gloss})"]
@@ -259,7 +267,8 @@ def alert_body(rule: dict, values: dict, reasons: list[str],
     html_body = mailhtml.page(
         f"{rule['symbol']} · {label}", clock.stamp(),
         [mailhtml.alert_card(rule["symbol"], rule["exchange"], label, price_line,
-                             reasons, gloss, note, repeat, fmt,
+                             reasons, gloss, note,
+                             " ".join(x for x in (stale_note, repeat) if x), fmt,
                              day if isinstance(day, (int, float)) else None)],
         "your own rule fired this, it isn't advice — check before acting")
 
@@ -273,13 +282,39 @@ def alert_body(rule: dict, values: dict, reasons: list[str],
     short = _holding_short(rule["symbol"], price)
     if short:
         tg_lines += ["", tg.esc(short)]
-    tg_lines += ["", f"<i>{tg.esc(repeat)}</i>"]
+    tg_lines += ["", f"<i>{tg.esc(' '.join(x for x in (stale_note, repeat) if x))}</i>"]
     return "\n".join(out), html_body, tg.clip("\n".join(tg_lines))
 
 
-def run_once(verbose: bool = True) -> list[dict]:
-    """Check all active rules once. Returns the alerts that fired this run."""
+def notifiable(now=None) -> bool:
+    """Whether prices right now are fresh enough to raise an alert on.
+
+    True during market hours and after the close (the day's settled prices);
+    False pre-open and at weekends, when "the price" is a previous session's
+    last trade.
+    """
+    status = clock.market_status(now)
+    return status["open"] or (status["phase"] == "closed"
+                              and clock._hm(now or clock.ist_now()) >= clock.CLOSE)
+
+
+def run_once(verbose: bool = True, force: bool = False) -> list[dict]:
+    """Check all active rules once. Returns the alerts that fired this run.
+
+    `force` sends even outside market hours — for the app's manual "Run alert
+    check now" button, where you asked for it explicitly.
+    """
     db.init_db()
+    if not (force or notifiable()):
+        # Return before touching anything. The cron starts at 08:30 IST, 45
+        # minutes before the open, so these runs would only ever see yesterday's
+        # close — and recording that as a rule's state would consume a crossing
+        # (an edge rule would go quiet, having "already fired") without ever
+        # sending the mail.
+        if verbose:
+            print(f"[watcher] {clock.market_status()['label']} — skipping, "
+                  f"prices aren't from a live session")
+        return []
     rules = db.get_rules(active_only=True)
     fired = []
     values_cache: dict[str, dict] = {}

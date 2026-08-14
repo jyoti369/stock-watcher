@@ -627,6 +627,37 @@ def test_clock_ist_and_wording():
     assert clock.when(today - timedelta(days=2), today) == "Wed 12 Aug (2 days ago)"
 
 
+def test_market_clock_knows_the_hour():
+    from datetime import datetime
+    from src import clock
+
+    def at(day: int, hour: int, minute: int = 0):
+        return datetime(2026, 8, day, hour, minute, tzinfo=clock.IST)
+
+    # 14 Aug 2026 is a Friday, 15th a Saturday, 17th a Monday
+    assert clock.market_status(at(14, 8, 30))["phase"] == "closed"
+    assert clock.market_status(at(14, 9, 5))["phase"] == "pre-open"
+    assert clock.market_status(at(14, 9, 15))["phase"] == "open"
+    assert clock.market_status(at(14, 15, 29))["open"] is True
+    assert clock.market_status(at(14, 15, 30))["open"] is False
+    assert clock.market_status(at(14, 20, 10))["phase"] == "closed"
+    assert clock.market_status(at(15, 11, 0))["phase"] == "weekend"
+    assert clock.market_status(at(16, 11, 0))["phase"] == "weekend"
+    assert clock.market_status(at(17, 11, 0))["phase"] == "open"
+    # Friday evening points at Monday, midweek evening at tomorrow
+    assert "Mon" in clock.market_status(at(14, 20, 10))["label"]
+    assert "tomorrow" in clock.market_status(at(13, 20, 10))["label"]
+    assert "Mon" in clock.market_status(at(15, 20, 10))["label"]
+
+    # the IPO application cutoff is its own clock, not the market's
+    assert clock.past_ipo_cutoff(at(14, 15, 45)) is False
+    assert clock.past_ipo_cutoff(at(14, 16, 0)) is True
+    assert clock.past_ipo_cutoff(at(14, 20, 10)) is True
+
+    assert clock.price_note(at(14, 11, 0)) == "live price"
+    assert "market is closed" in clock.price_note(at(14, 20, 10))
+
+
 def test_money_formatting():
     from src import fmt
 
@@ -884,7 +915,7 @@ def test_html_mail_colours_each_number_for_itself():
 
 
 def test_ipo_brief_groups_by_action(monkeypatch):
-    from datetime import timedelta
+    from datetime import datetime, timedelta
     from src import clock, ipo
 
     today = clock.ist_today()
@@ -910,7 +941,9 @@ def test_ipo_brief_groups_by_action(monkeypatch):
          "close": "x", "updated": "", "source": "investorgain.com (live)"},
     ]
     monkeypatch.setattr(ipo, "screen", lambda: rows)
-    b = ipo.brief(today)
+    # at 12:05 pm the last-day issues are still actionable
+    midday = datetime(today.year, today.month, today.day, 12, 5, tzinfo=clock.IST)
+    b = ipo.brief(today, now=midday)
 
     # only same-day deadlines become to-dos: the one closing in 3 days must not
     assert len(b["todo"]) == 2
@@ -925,10 +958,31 @@ def test_ipo_brief_groups_by_action(monkeypatch):
     assert "as of 14th Aug 13:10" in b["footer"]
     assert "grey-market premium 36.1% (₹35 over the ₹97 price)" in b["act"][0]
 
-    assert ipo.closing_phrase({"closes": today}, today) == \
+    assert ipo.closing_phrase({"closes": today}, midday) == \
         "closes today — last day to apply"
-    assert ipo.closing_phrase({"closes": today + timedelta(days=3)}, today) == \
+    assert ipo.closing_phrase({"closes": today + timedelta(days=3)}, midday) == \
         "closes " + clock.when(today + timedelta(days=3), today)
+
+    # …and the whole point: at 8pm the 4pm cutoff has gone, so the same issues
+    # must stop being presented as things to do. This is the bug that had the
+    # app saying "bids close 4 pm today" four hours after they closed.
+    evening = datetime(today.year, today.month, today.day, 20, 10, tzinfo=clock.IST)
+    assert ipo.window({"closes": today}, evening) == "shut"
+    assert ipo.window({"closes": today}, midday) == "last-day"
+    assert ipo.window({"closes": today + timedelta(days=1)}, evening) == "open"
+    assert ipo.window({"closes": today - timedelta(days=1)}, midday) == "shut"
+    assert ipo.window({"closes": None}, midday) == "unknown"
+    assert ipo.closing_phrase({"closes": today}, evening) == \
+        "bids shut at 4 pm today — nothing left to do"
+
+    late = ipo.brief(today, now=evening)
+    assert late["todo"] == []                     # nothing to do after the cutoff
+    assert not any(r["last_day"] for r in late["rows"])
+    # a shut window overrides the scorecard entirely
+    assert ipo.verdict({"window": "shut", "sme": False, "gmp_pct": 36.1,
+                        "total": 102.0, "qib": 125.0}) == (
+        "CLOSED", "applications are shut — allotment usually shows up in 2-3 "
+                  "working days")
 
 
 def test_alert_body_plain_language(monkeypatch):
@@ -1005,13 +1059,23 @@ def test_level_rule_mails_once_a_day(monkeypatch):
                         sent.append((s, html_body, tg_text)) or ["email"])
 
     monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [rule])
-    assert watcher.run_once(verbose=False) == [] and sent == []
+    assert watcher.run_once(verbose=False, force=True) == [] and sent == []
+
+    # outside a live session the checker does nothing at all — recording state
+    # from yesterday's close would consume the crossing without mailing it
+    monkeypatch.setattr(watcher, "notifiable", lambda now=None: False)
+    touched = []
+    monkeypatch.setattr(watcher.db, "set_last_state",
+                        lambda *a: touched.append(a))
+    assert watcher.run_once(verbose=False) == [] and touched == []
+    monkeypatch.setattr(watcher, "notifiable", lambda now=None: True)
+    monkeypatch.setattr(watcher.db, "set_last_state", lambda *a: None)
 
     # yesterday's mail doesn't hold it back — one a day, not one ever
     stale = {**rule, "last_triggered": (now - timedelta(days=1)).astimezone(
         timezone.utc).isoformat()}
     monkeypatch.setattr(watcher.db, "get_rules", lambda active_only=True: [stale])
-    assert len(watcher.run_once(verbose=False)) == 1
+    assert len(watcher.run_once(verbose=False, force=True)) == 1
     assert sent and sent[0][0].startswith("🔔 INFY · dip · ")
     assert "<table" in sent[0][1]          # the mail carries an HTML part too
 

@@ -576,24 +576,38 @@ def send_morning() -> list[str]:
             block.append(ipos["skip"])
         block.append(ipos["footer"])
         sections.append("\n".join(block))
-        keep = [r for r in ipos["rows"] if r["verdict"] != "SKIP"]
+        # the still-open ones only: a shut issue has its own section below
+        keep = [r for r in ipos["rows"] if r["verdict"] not in ("SKIP", "CLOSED")]
         html_blocks.append(mailhtml.section(
             "IPOs open right now",
             mailhtml.ipo_rows(keep)
             + (mailhtml.note(ipos["skip"]) if ipos["skip"] else "")))
-        # the open IPOs as columns: premium, book, QIB, last day — the four
-        # numbers the house rules are actually checked against
-        ipo_rows = [[tg.short_symbol(r["name"]),
-                     (f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "—"),
-                     (f"{r['total']:g}x" if r.get("total") is not None else "—"),
-                     (f"{r['qib']:g}x" if r.get("qib") is not None else "—"),
-                     ("TODAY" if r.get("last_day") else
-                      clock.short(r["closes"]) if r.get("closes") else "—")]
-                    for r in keep]
-        tg_parts.append(
-            tg.b("🎯 IPOs open") + "\n"
-            + tg.table(["IPO", "GMP", "Book", "QIB", "Ends"], ipo_rows)
-            + (f"\n<i>{tg.esc(ipos['skip'])}</i>" if ipos["skip"] else ""))
+        # as columns: premium, book, QIB and when it ends — the four numbers the
+        # house rules are actually checked against
+        if keep:
+            tg_parts.append(
+                tg.b("🎯 IPOs open") + "\n"
+                + tg.table(["IPO", "GMP", "Book", "QIB", "Ends"],
+                           [[tg.short_symbol(r["name"]),
+                             (f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None
+                              else "—"),
+                             (f"{r['total']:g}x" if r.get("total") is not None
+                              else "—"),
+                             (f"{r['qib']:g}x" if r.get("qib") is not None else "—"),
+                             r.get("ends", "?")] for r in keep])
+                + (f"\n<i>{tg.esc(ipos['skip'])}</i>" if ipos["skip"] else ""))
+        elif ipos["skip"]:
+            tg_parts.append(tg.b("🎯 IPOs open") + f"\n<i>{tg.esc(ipos['skip'])}</i>")
+    if ipos.get("closed"):
+        # today's shut issues: nothing to do, but you want to know the bid is in
+        # and roughly when allotment lands
+        sections.append("⌛ Applications closed — waiting on allotment\n"
+                        + "\n".join("• " + c for c in ipos["closed"]))
+        html_blocks.append(mailhtml.section(
+            "Applications closed — waiting on allotment",
+            mailhtml.bullets(ipos["closed"])))
+        tg_parts.append(tg.b("⌛ Closed, awaiting allotment") + "\n"
+                        + tg.bullets(ipos["closed"]))
     if drops:
         sections.append("🛒 Tracked prices moved\n" + "\n".join(drops))
         html_blocks.append(mailhtml.section("Tracked prices moved",

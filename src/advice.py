@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import date, timedelta
 
+from . import clock
 from .repo_state import STATE_DIR, _fernet
 
 ADVICE_JSON = STATE_DIR / "advice.json"
@@ -61,7 +62,7 @@ def new_entry(symbol: str, stance: str, thesis: str, catalyst: str = "",
     return {"symbol": symbol.upper(), "stance": stance, "thesis": thesis,
             "catalyst": catalyst, "catalyst_date": catalyst_date,
             "sell_above": sell_above, "stop_below": stop_below,
-            "review_by": review_by, "added": date.today().isoformat(),
+            "review_by": review_by, "added": clock.ist_today().isoformat(),
             "status": "OPEN", "outcome": ""}
 
 

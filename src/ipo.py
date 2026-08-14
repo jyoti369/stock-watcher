@@ -185,7 +185,7 @@ def _parse_investorgain(data: dict) -> list[dict]:
 def fetch_investorgain() -> list[dict]:
     """Live rows (see _parse_investorgain). [] on any failure — the caller
     then falls back to the ipowatch pages."""
-    today = date.today()
+    today = clock.ist_today()
     url = IG_URL.format(m=today.month, y=today.year, fy=_fy(today))
     try:
         return _parse_investorgain(
@@ -225,16 +225,28 @@ def screen() -> list[dict]:
             merged.append({**s, "gmp": g.get("gmp"), "price": g.get("price"),
                            "gmp_pct": g.get("gmp_pct"), "updated": "",
                            "closes": closes})
+    now = clock.ist_now()
     for row in merged:
         row["source"] = source
+        row["window"] = window(row, now)          # decided by the clock, not the date
         row["verdict"], row["why"] = verdict(row)
-    order = {"APPLY-ZONE": 0, "WATCH": 1, "SKIP": 2, "NO DATA": 3}
+    # anything you can still act on first; today's shut issues sink below the
+    # ones still open, since they're now just waiting on allotment
+    order = {"APPLY-ZONE": 0, "WATCH": 1, "SKIP": 2, "NO DATA": 3, "CLOSED": 4}
     merged.sort(key=lambda r: (order.get(r["verdict"], 9), -(r["gmp_pct"] or 0)))
     return merged
 
 
 def verdict(row: dict) -> tuple[str, str]:
-    """House-rules call on one IPO: APPLY-ZONE / WATCH / SKIP / NO DATA."""
+    """House-rules call on one IPO: CLOSED / APPLY-ZONE / WATCH / SKIP / NO DATA.
+
+    CLOSED comes first: once the application window is gone, how well it scores
+    against the bars is history, and presenting it as an opportunity is the bug
+    that had this app saying "apply before 4 pm today" at 8pm.
+    """
+    if row.get("window") == "shut":
+        return "CLOSED", ("applications are shut — allotment usually shows up "
+                          "in 2-3 working days")
     rules = RULES["sme" if row.get("sme") else "mainboard"]
     pct, total, qib = row.get("gmp_pct"), row.get("total"), row.get("qib")
     if pct is None and total is None:
@@ -275,11 +287,38 @@ def close_day(row: dict, today: date | None = None) -> str:
     return "today" if closes == today else clock.when(closes, today)
 
 
-def closing_phrase(row: dict, today: date | None = None) -> str:
-    """'closes today — last day to apply' / 'closes Mon 17 Aug (in 3 days)'."""
-    day = close_day(row, today)
-    return ("closes today — last day to apply" if day == "today"
-            else f"closes {day}")
+def window(row: dict, now=None) -> str:
+    """Whether you can still apply: 'open' | 'last-day' | 'shut' | 'unknown'.
+
+    The date alone isn't enough. An IPO whose last day is today is over once the
+    4pm cutoff passes — reading "apply before 4 pm today" at 8pm is worse than
+    useless, it's a decision you can no longer make.
+    """
+    now = now or clock.ist_now()
+    closes = row.get("closes")
+    if not isinstance(closes, date):
+        return "unknown"
+    today = now.date()
+    if closes > today:
+        return "open"
+    if closes < today:
+        return "shut"
+    return "shut" if clock.past_ipo_cutoff(now) else "last-day"
+
+
+def closing_phrase(row: dict, now=None) -> str:
+    """Where this issue stands, in words — honest about the hour, not just the
+    date: 'closes today — last day to apply' before 4pm, 'bids shut at 4 pm
+    today' after it."""
+    now = now or clock.ist_now()
+    state = window(row, now)
+    if state == "shut" and row.get("closes") == now.date():
+        return "bids shut at 4 pm today — nothing left to do"
+    if state == "shut":
+        return f"closed {close_day(row, now.date())}"
+    if state == "last-day":
+        return "closes today — last day to apply"
+    return f"closes {close_day(row, now.date())}"
 
 
 def numbers_phrase(row: dict, compact: bool = False) -> str:
@@ -303,7 +342,7 @@ def numbers_phrase(row: dict, compact: bool = False) -> str:
     return " · ".join(bits)
 
 
-def brief(today: date | None = None) -> dict:
+def brief(today: date | None = None, now: datetime | None = None) -> dict:
     """The IPO section of the midday mail, grouped by what you'd actually do.
 
     Returns {act, watch, skip, footer, todo}: `act` are the ones passing every
@@ -315,27 +354,46 @@ def brief(today: date | None = None) -> dict:
     rows = screen()
     if not rows:
         return {"act": [], "watch": [], "skip": None, "footer": "", "todo": [],
-                "rows": []}
-    today = today or clock.ist_today()
-    act, watch, skipped, todo = [], [], [], []
+                "rows": [], "closed": []}
+    now = now or clock.ist_now()          # injectable so tests don't drift by hour
+    today = today or now.date()
+    act, watch, skipped, todo, closed = [], [], [], [], []
     table = []
     for r in rows:
         kind = "SME" if r.get("sme") else "mainboard"
         head = f"{r['name']} ({kind})"
+        state = r.get("window") or window(r, now)
+        # a to-do only exists while you can still act: last day AND before the
+        # 4pm cutoff. After it, the same issue belongs under "waiting".
+        actionable = state == "last-day"
         table.append({"name": r["name"], "kind": kind, "verdict": r["verdict"],
                       "numbers": numbers_phrase(r),
-                      "closes": closing_phrase(r, today),
-                      "last_day": r.get("closes") == today, "why": r["why"]})
-        if r["verdict"] == "APPLY-ZONE":
-            act.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}")
-            if r.get("closes") == today:
+                      "closes": closing_phrase(r, now),
+                      # `ends` is the column-width version for a narrow table;
+                      # `closes` is the sentence. Keep them separate — formatting
+                      # the sentence as a date is a crash waiting to happen.
+                      "ends": ("TODAY" if actionable else "shut"
+                               if state == "shut" else
+                               clock.short(r["closes"])
+                               if isinstance(r.get("closes"), date) else "?"),
+                      "last_day": actionable, "why": r["why"],
+                      # raw figures too, so a renderer can lay out its own
+                      # columns without reaching back into screen()'s rows
+                      "gmp_pct": r.get("gmp_pct"), "total": r.get("total"),
+                      "qib": r.get("qib")})
+        if r["verdict"] == "CLOSED":
+            closed.append(f"{head} — {numbers_phrase(r, compact=True)} · "
+                          f"{closing_phrase(r, now)}")
+        elif r["verdict"] == "APPLY-ZONE":
+            act.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, now)}")
+            if actionable:
                 todo.append(f"Apply for {r['name']} ({kind} IPO) — today is the "
                             f"last day, bids close at 4 pm. "
                             f"{numbers_phrase(r, compact=True)}. One lot, one PAN.")
         elif r["verdict"] == "WATCH":
-            watch.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, today)}"
+            watch.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, now)}"
                          f"\n  {r['why']}")
-            if r.get("closes") == today:
+            if actionable:
                 bar = RULES["sme" if r.get("sme") else "mainboard"]
                 todo.append(f"Decide on {r['name']} ({kind} IPO) today — bids "
                             f"close at 4 pm. The premium clears the bar but "
@@ -358,4 +416,4 @@ def brief(today: date | None = None) -> dict:
     # the HTML mail draws its own table, so it gets the rows too — same numbers,
     # just not pre-strung into sentences
     return {"act": act, "watch": watch, "skip": skip, "footer": footer,
-            "todo": todo, "rows": table}
+            "todo": todo, "rows": table, "closed": closed}

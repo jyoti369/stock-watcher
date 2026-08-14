@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 
+from . import clock
 from .repo_state import STATE_DIR, _fernet
 
 PLAN_JSON = STATE_DIR / "finance_plan.json"
@@ -65,7 +65,7 @@ def save_plan(content: str) -> bool:
     current = load_plan()
     if current is not None and current.get("content") == content:
         return True                                   # unchanged — no commit churn
-    data = {"updated": datetime.now().strftime("%d %b %Y, %H:%M"), "content": content}
+    data = {"updated": clock.stamp(), "content": content}
     STATE_DIR.mkdir(exist_ok=True)
     PLAN_JSON.write_text(json.dumps(
         {"encrypted": True, "cipher": f.encrypt(json.dumps(data, ensure_ascii=False).encode()).decode()}))

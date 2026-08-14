@@ -67,3 +67,62 @@ def gap_phrase(d: date, today: date | None = None) -> str:
 def when(d: date, today: date | None = None) -> str:
     """'Fri 14 Aug (tomorrow)' — the date and its distance, never one alone."""
     return f"{short(d)} ({gap_phrase(d, today)})"
+
+
+# NSE/BSE equity hours, IST. Pre-open is the 09:00-09:15 auction.
+PRE_OPEN = (9, 0)
+OPEN = (9, 15)
+CLOSE = (15, 30)
+# The house rule for IPO applications: bids in before 4pm on the last day.
+IPO_CUTOFF = (16, 0)
+
+
+def _hm(when_: datetime) -> tuple[int, int]:
+    return (when_.hour, when_.minute)
+
+
+def market_status(now: datetime | None = None) -> dict:
+    """Where the trading day is right now: {phase, open, label}.
+
+    phase is one of pre-open / open / closed / weekend. `open` means orders are
+    actually being matched, which is what decides whether a price on screen is
+    live or the last trade of a previous session.
+
+    Exchange holidays are NOT known here — NSE's calendar endpoint refuses
+    datacenter IPs and 403s even from home, so a Monday holiday will read as
+    "open". The label says "market hours" rather than "trading" for that reason;
+    anything that would mislead should show the price timestamp beside it.
+    """
+    now = now or ist_now()
+    hm = _hm(now)
+    if now.weekday() >= 5:                      # Saturday, Sunday
+        return {"phase": "weekend", "open": False,
+                "label": f"Market shut for the weekend · opens "
+                         f"{'Mon' if now.weekday() == 5 else 'tomorrow'} 9:15 am"}
+    if hm < PRE_OPEN:
+        return {"phase": "closed", "open": False,
+                "label": "Market opens at 9:15 am"}
+    if hm < OPEN:
+        return {"phase": "pre-open", "open": False,
+                "label": "Pre-open auction · trading starts 9:15 am"}
+    if hm < CLOSE:
+        return {"phase": "open", "open": True,
+                "label": "Market hours · closes 3:30 pm"}
+    return {"phase": "closed", "open": False,
+            "label": f"Market closed at 3:30 pm · "
+                     f"{'Mon' if now.weekday() == 4 else 'tomorrow'} 9:15 am next"}
+
+
+def market_open(now: datetime | None = None) -> bool:
+    return market_status(now)["open"]
+
+
+def past_ipo_cutoff(now: datetime | None = None) -> bool:
+    """True once the 4pm application deadline for the day has gone."""
+    return _hm(now or ist_now()) >= IPO_CUTOFF
+
+
+def price_note(now: datetime | None = None) -> str:
+    """How to read a price shown at this moment."""
+    st = market_status(now)
+    return "live price" if st["open"] else "last traded price, market is closed"

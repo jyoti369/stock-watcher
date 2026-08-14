@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
-from . import (advice, ai_insights, analysis, db, finance_plan, mf, portfolio,
-               reminders, watcher)
+from . import (advice, ai_insights, analysis, clock, db, finance_plan, mf,
+               portfolio, reminders, watcher)
 from .repo_state import _read_maybe_enc, WATCHLIST_JSON
 
 BRIEF = (
@@ -280,7 +280,7 @@ def _watchlist_block() -> str:
 def _money_context(today: date | None = None) -> str:
     """Compact text pack of the whole app: holdings, funds, plan, ledger,
     alerts, reminders and watchlist, stamped with today's date."""
-    today = today or date.today()
+    today = today or clock.ist_today()
     blocks = [
         f"TODAY IS {advice.pretty_date(today.isoformat())} "
         f"({today.strftime('%A')}, {today.isoformat()}).",

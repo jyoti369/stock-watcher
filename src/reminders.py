@@ -17,6 +17,7 @@ import hashlib
 import json
 from datetime import date, timedelta
 
+from . import clock
 from .repo_state import STATE_DIR, _fernet
 
 REMINDERS_JSON = STATE_DIR / "reminders.json"
@@ -51,7 +52,7 @@ def mark_done(reference: str) -> str | None:
     # a repeating reminder shouldn't be killed by one tick — it rolls forward on
     # its own, so record the date it was last handled instead
     if repeats(target):
-        target["last_done"] = date.today().isoformat()
+        target["last_done"] = clock.ist_today().isoformat()
     else:
         target["done"] = True
     save(rows)
@@ -88,7 +89,7 @@ def new(text: str, on: str, yearly: bool = False, monthly: bool = False,
         until: str | None = None) -> dict:
     r = {"text": text, "date": on, "yearly": bool(yearly),
          "monthly": bool(monthly), "done": False,
-         "created": date.today().isoformat()}
+         "created": clock.ist_today().isoformat()}
     if until:
         r["until"] = until
     return r

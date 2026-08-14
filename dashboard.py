@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
-from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -263,6 +262,14 @@ def monte_carlo_block(symbol, exchange, years, amount, period_label):
 with st.sidebar:
     st.title(f"{brand.ICON} {brand.NAME}")
     st.caption(brand.TAGLINE)
+    # Where the clock actually is. Without this, a price on screen at 8pm looks
+    # like a live one, and "closes today" reads as still open.
+    _mkt = clock.market_status()
+    st.caption(f"{'🟢' if _mkt['open'] else '🔴'} {_mkt['label']}  \n"
+               f"{clock.stamp()}",
+               help="Holidays aren't known — NSE's calendar blocks this app's "
+                    "requests — so a holiday will still read as market hours. "
+                    "Check the price timestamp if it matters.")
 
     # Order is deliberate: the two buttons you reach for most sit at the top,
     # where they're reachable on a phone without scrolling a drawer. Adding a
@@ -278,7 +285,8 @@ with st.sidebar:
     if st.button("🔔 Run alert check now", width="stretch",
                  help="Checks every active rule right now and notifies if one matches."):
         with st.spinner("Checking your rules against live prices…"):
-            fired = watcher.run_once(verbose=False)
+            # force=True: you asked for it, so run it even outside market hours
+            fired = watcher.run_once(verbose=False, force=True)
         st.toast(f"{len(fired)} alert(s) fired" if fired else "Checked — nothing triggered")
 
     with st.expander("➕ Add to watchlist"):
@@ -386,7 +394,7 @@ def reminders_fragment() -> None:
     from datetime import date as _rdate
     st.markdown("### 📅 Reminders")
     rlist = reminders.load() or []
-    _rtoday = _rdate.today()
+    _rtoday = clock.ist_today()
     rsorted = sorted(rlist, key=lambda r: (reminders.effective_date(r, _rtoday) or _rdate.max))
     due_now = [r for r in rsorted if reminders.due(r, _rtoday)]
     if due_now:
@@ -679,6 +687,7 @@ with tabs[0]:
                    "gauge (under 30 = heavily sold off, over 70 = heavily bought). **P/E** = price "
                    "÷ a year's profit per share. Open **Stock analysis** for the deep view + bottom "
                    "line. Prices via NSE live where available, else ~15-min delayed.")
+        st.caption(f"🕒 {clock.stamp()} — showing the {clock.price_note()}.")
 
         with st.expander("⚙️ Manage watchlist"):
             for w in watchlist:
@@ -1048,7 +1057,7 @@ with tabs[2]:
                 st.write(f"Deep-checking the top {top_n} (statements, peers, "
                          f"valuation)…")
                 st.session_state["suggestions"] = ranked_now
-                st.session_state["suggestions_ts"] = datetime.now().strftime("%d %b %Y, %H:%M")
+                st.session_state["suggestions_ts"] = clock.stamp()
                 try:                       # persist so the next visit is instant
                     import pickle
                     SUGG_CACHE.write_bytes(pickle.dumps(
@@ -1602,11 +1611,10 @@ with tabs[6]:
         st.warning("Set STOCKWATCH_STATE_KEY in secrets to unlock the ledger — it is "
                    "stored encrypted so the public repo never sees it.")
     else:
-        from datetime import date as _date
         adv = advice.load_advice() or []
         open_calls = [a for a in adv if a.get("status", "OPEN") == "OPEN"]
         closed = [a for a in adv if a.get("status", "OPEN") != "OPEN"]
-        today = _date.today()
+        today = clock.ist_today()
         due = [a for a in open_calls if advice.due_soon(a, today)]
 
         right = sum(1 for a in closed if a["status"] == "DONE-RIGHT")
@@ -1749,8 +1757,8 @@ with tabs[8]:
         with st.spinner("Pulling live GMP + subscription numbers…"):
             # 10-min cache bucket so a tab hop doesn't re-scrape but a manual
             # recheck during the last-day window stays close to live
-            ipo_rows = _ipo_screen_cached(datetime.now().strftime("%Y%m%d%H")
-                                          + str(datetime.now().minute // 10))
+            ipo_rows = _ipo_screen_cached(clock.ist_now().strftime("%Y%m%d%H")
+                                          + str(clock.ist_now().minute // 10))
         if not ipo_rows:
             st.warning("Couldn't read any IPO data right now — the source page "
                        "may be down or reshaped. Try again in a bit, or check "
@@ -1760,24 +1768,28 @@ with tabs[8]:
             st.caption(f"Source: {ipo_rows[0].get('source', '?')}"
                        + (f" · subscription updated **{upd}**" if upd else "")
                        + " · this page re-pulls at most every 10 min")
-            badge = {"APPLY-ZONE": "🟢", "WATCH": "🟡", "SKIP": "🔴", "NO DATA": "⚪"}
-            today_ist = clock.ist_today()
+            badge = {"APPLY-ZONE": "🟢", "WATCH": "🟡", "SKIP": "🔴",
+                     "NO DATA": "⚪", "CLOSED": "⌛"}
+            now_ist = clock.ist_now()
             for r in ipo_rows:
                 pct = f"{r['gmp_pct']:g}%" if r.get("gmp_pct") is not None else "?"
                 tot = f"{r['total']:g}x" if r.get("total") is not None else "?"
                 qib = f"{r['qib']:g}x" if r.get("qib") is not None else "?"
-                last_day = r.get("closes") == today_ist
+                state = r.get("window") or ipo.window(r, now_ist)
+                # only bold the deadline while it's still a deadline — after 4pm
+                # it's information, not a call to act
+                tail = ("**⏳ last day — bids close 4 pm today**"
+                        if state == "last-day" else ipo.closing_phrase(r, now_ist))
                 st.markdown(
                     f"{badge.get(r['verdict'], '⚪')} **{r['name']}** "
                     f"({'SME' if r.get('sme') else 'Mainboard'}) — GMP {pct} · "
-                    f"total {tot} · QIB {qib} · "
-                    + ("**⏳ last day — bids close 4 pm today**" if last_day
-                       else ipo.closing_phrase(r, today_ist)))
+                    f"total {tot} · QIB {qib} · " + tail)
                 st.caption(f"{r['verdict']}: {r['why']}")
             explain("APPLY-ZONE = passes every bar **today** — still apply only "
-                       "on the last day. WATCH = GMP qualifies but the book is "
-                       "still filling (normal on day 1-2). Numbers move all day; "
-                       "recheck before paying.")
+                    "on the last day, before the 4 pm cutoff. WATCH = GMP "
+                    "qualifies but the book is still filling (normal on day 1-2). "
+                    "⌛ CLOSED = the application window has gone; what's left is "
+                    "the allotment. Numbers move all day; recheck before paying.")
 
 # ================================================================ buy advisor
 with tabs[9]:
@@ -1826,8 +1838,8 @@ with tabs[9]:
         with st.status(f"Searching for “{q}”…", expanded=True) as _sh:
             st.write("Asking Amazon, Flipkart and Myntra… (up to ~1 min, they "
                      "throttle rapid requests)")
-            found = _shop_cached(q, cap, datetime.now().strftime("%Y%m%d%H")
-                                 + str(datetime.now().minute // 30))
+            found = _shop_cached(q, cap, clock.ist_now().strftime("%Y%m%d%H")
+                                 + str(clock.ist_now().minute // 30))
             st.write(f"Scoring {len(found)} listings that matched your words…")
             _sh.update(label=f"Found {len(found)} listings for “{q}”",
                        state="complete", expanded=False)
