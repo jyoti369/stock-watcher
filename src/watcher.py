@@ -169,8 +169,13 @@ def _fired_today(last_triggered: str | None) -> bool:
 def _holding_note(symbol: str, price: float | None) -> str:
     """'You hold 25 shares at ₹1,320 average — that's -₹3,775 (-11.4%) today.'
     Empty when you don't own it or there's no live price."""
-    lots = [h for h in db.get_holdings() if h["symbol"] == symbol.upper()]
-    if not lots or price is None:
+    if price is None:
+        return ""
+    try:
+        lots = [h for h in db.get_holdings() if h["symbol"] == symbol.upper()]
+    except Exception:
+        return ""          # no holdings store on this run — the alert still sends
+    if not lots:
         return ""
     pos = portfolio.by_symbol([portfolio.lot_row(h, {"price": price}) for h in lots])
     if not pos:

@@ -723,9 +723,13 @@ def test_ipo_brief_groups_by_action(monkeypatch):
         "closes " + clock.when(today + timedelta(days=3), today)
 
 
-def test_alert_body_plain_language():
+def test_alert_body_plain_language(monkeypatch):
     from datetime import timedelta
     from src import clock, watcher
+
+    monkeypatch.setattr(watcher.db, "get_holdings",
+                        lambda: [{"symbol": "INFY", "exchange": "NSE", "qty": 6,
+                                  "buy_price": 1455.0}])
 
     rule = {"symbol": "INFY", "exchange": "NSE", "label": "below 200dma dip",
             "mode": "level", "conditions": [
@@ -740,6 +744,12 @@ def test_alert_body_plain_language():
                               clock.ist_today() - timedelta(days=2))
     assert clock.stamp()[:12] in body                  # dated, always
     assert "₹1,169" in body and "🔻 -0.5% today" in body
+    assert "You hold 6 shares at ₹1,455 average" in body
+    assert "-₹1,716" in body                           # what it costs you today
+    # a missing holdings store must not stop the alert going out
+    monkeypatch.setattr(watcher.db, "get_holdings",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no db")))
+    assert "just matched" in watcher.alert_body(rule, values, reasons)
     assert "3 days running" in body                    # explains the repeat
     assert "Pause it" in body
     fresh = watcher.alert_body(rule, values, reasons, clock.ist_today())
