@@ -2048,34 +2048,35 @@ with tabs[10]:
                  "the links work from your phone.")
 
         st.markdown("**🎯 IPO bars**")
-        st.caption("What an issue has to clear before the 🎯 tab and the midday "
-                   "brief call it worth applying for. The premium is your cushion "
-                   "if you're allotted; QIB is the check that the book is real.")
+        st.caption("What an issue must clear before the 🎯 tab and the midday "
+                   "brief say apply. All three bars at once — calibrated on 383 "
+                   "listings from 2025–26, no issue clearing all three opened "
+                   "below its price. Any one alone still lost money.")
         _bars = settings.ipo_rules()
         p_ipo = {}
         for _kind, _label in (("mainboard", "Mainboard"), ("SME", "SME")):
             _k = _kind.lower()
             st.caption(f"**{_label}**")
             _c1, _c2, _c3 = st.columns(3)
+            _lim = settings.IPO_BARS
             p_ipo[_k] = {
                 "gmp_pct": _c1.number_input(
-                    "Premium %", 0.0, 100.0, float(_bars[_k]["gmp_pct"]), 1.0,
+                    "Premium %", *_lim["gmp_pct"], float(_bars[_k]["gmp_pct"]), 1.0,
                     key=f"ipo_gmp_{_k}",
-                    help="Grey-market premium over the issue price. Higher = more "
-                         "room to still profit if it opens weaker than the "
-                         "premium suggests."),
+                    help="Grey-market premium over the issue price. A deep book "
+                         "with a middling premium still opened negative (Asston: "
+                         "130x subscribed, 21% premium, opened −3.3%)."),
                 "total": _c2.number_input(
-                    "Total subs ×", 0.0, 200.0, float(_bars[_k]["total"]), 1.0,
+                    "Total subs ×", *_lim["total"], float(_bars[_k]["total"]), 1.0,
                     key=f"ipo_total_{_k}",
-                    help="Overall oversubscription. A quality signal, not a "
-                         "payoff one — past roughly 60x it mostly means your "
-                         "allotment odds are thin."),
+                    help="Overall oversubscription on the last afternoon, not the "
+                         "morning — SME books multiply in the final hours."),
                 "qib": _c3.number_input(
-                    "QIB ×", 0.0, 100.0, float(_bars[_k]["qib"]), 0.5,
+                    "QIB ×", *_lim["qib"], float(_bars[_k]["qib"]), 0.5,
                     key=f"ipo_qib_{_k}",
-                    help="Institutional subscription. The single best "
-                         "anti-manipulation check — big money doesn't bid on "
-                         "painted books."),
+                    help="Institutional subscription, the anti-manipulation check. "
+                         "A fat premium on a thin book still opened −20% "
+                         "(Rukmani Devi: 36% premium, QIB 8x)."),
             }
 
         st.markdown("**📖 Reading help**")
