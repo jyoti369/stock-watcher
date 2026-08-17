@@ -5,9 +5,14 @@ predict a pop are grey-market premium (unofficial, manipulable — especially in
 SME issues) and subscription depth (QIB interest is the anti-manipulation
 check, since institutions don't touch rigged books). Hence two rule sets:
 
-  Mainboard: GMP >= 20% holding into the close, total sub >= 15x, QIB >= 5x.
-  SME:       GMP >= 35%, total sub >= 25x by day 2, QIB >= 2x.
-             (min application ~Rs 2L+, allotment is a lottery — size for it)
+  Mainboard: GMP >= 15%, total sub >= 10x, QIB >= 5x.
+  SME:       GMP >= 30%, total sub >= 20x, QIB >= 2x.
+             (min application ~Rs 1L+, allotment is a lottery — size for it)
+
+Those are the shipped defaults; the live numbers come from settings.ipo_rules()
+and are editable in the Settings tab. The premium bar is what protects you from
+a weak open if you're allotted, which is why SME's sits higher: the same premium
+means less on a book a fraction of the size.
 
 Always apply on the LAST day, late morning: allotment odds don't depend on
 when you bid, so waiting is free information. One lot per PAN — extra lots
@@ -37,10 +42,23 @@ IG_URL = ("https://webnodejs.investorgain.com/cloud/v2/report/data-read/"
           "333/1/{m}/{y}/{fy}/0/all?search=&v=1")
 _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
+# Fallback bars, used only if settings can't be read at all. The live ones come
+# from settings.ipo_rules() — they're a judgement call you tune as tickets
+# accumulate, not a constant of nature, so they belong in the Settings tab.
 RULES = {
-    "mainboard": {"gmp_pct": 20.0, "total": 15.0, "qib": 5.0},
-    "sme": {"gmp_pct": 35.0, "total": 25.0, "qib": 2.0},
+    "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
+    "sme": {"gmp_pct": 30.0, "total": 20.0, "qib": 2.0},
 }
+
+
+def bars(row: dict) -> dict:
+    """The bars that apply to this issue, from settings, SME or mainboard."""
+    kind = "sme" if row.get("sme") else "mainboard"
+    try:
+        from . import settings
+        return settings.ipo_rules()[kind]
+    except Exception:
+        return RULES[kind]
 
 
 def _num(text: str) -> float | None:
@@ -252,7 +270,7 @@ def verdict(row: dict) -> tuple[str, str]:
     if row.get("window") == "shut":
         return "CLOSED", ("applications are shut — allotment usually shows up "
                           "in 2-3 working days")
-    rules = RULES["sme" if row.get("sme") else "mainboard"]
+    rules = bars(row)
     pct, total, qib = row.get("gmp_pct"), row.get("total"), row.get("qib")
     if pct is None and total is None:
         return "NO DATA", "no GMP or subscription figures found"
@@ -397,7 +415,7 @@ def brief(today: date | None = None, now: datetime | None = None) -> dict:
             watch.append(f"{head} — {numbers_phrase(r)} · {closing_phrase(r, now)}"
                          f"\n  {r['why']}")
             if actionable:
-                bar = RULES["sme" if r.get("sme") else "mainboard"]
+                bar = bars(r)
                 todo.append(f"Decide on {r['name']} ({kind} IPO) before 4 pm — "
                             f"{numbers_phrase(r, compact=True)}; "
                             f"needs {bar['total']:g}x with QIB {bar['qib']:g}x+.")

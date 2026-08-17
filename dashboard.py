@@ -2047,6 +2047,37 @@ with tabs[10]:
             help="Where the mails should send you. The hosted Streamlit URL, so "
                  "the links work from your phone.")
 
+        st.markdown("**🎯 IPO bars**")
+        st.caption("What an issue has to clear before the 🎯 tab and the midday "
+                   "brief call it worth applying for. The premium is your cushion "
+                   "if you're allotted; QIB is the check that the book is real.")
+        _bars = settings.ipo_rules()
+        p_ipo = {}
+        for _kind, _label in (("mainboard", "Mainboard"), ("SME", "SME")):
+            _k = _kind.lower()
+            st.caption(f"**{_label}**")
+            _c1, _c2, _c3 = st.columns(3)
+            p_ipo[_k] = {
+                "gmp_pct": _c1.number_input(
+                    "Premium %", 0.0, 100.0, float(_bars[_k]["gmp_pct"]), 1.0,
+                    key=f"ipo_gmp_{_k}",
+                    help="Grey-market premium over the issue price. Higher = more "
+                         "room to still profit if it opens weaker than the "
+                         "premium suggests."),
+                "total": _c2.number_input(
+                    "Total subs ×", 0.0, 200.0, float(_bars[_k]["total"]), 1.0,
+                    key=f"ipo_total_{_k}",
+                    help="Overall oversubscription. A quality signal, not a "
+                         "payoff one — past roughly 60x it mostly means your "
+                         "allotment odds are thin."),
+                "qib": _c3.number_input(
+                    "QIB ×", 0.0, 100.0, float(_bars[_k]["qib"]), 0.5,
+                    key=f"ipo_qib_{_k}",
+                    help="Institutional subscription. The single best "
+                         "anti-manipulation check — big money doesn't bid on "
+                         "painted books."),
+            }
+
         st.markdown("**📖 Reading help**")
         p_explain = st.checkbox(
             "Show the 'how to read this' captions", value=PREFS["explainers"],
@@ -2059,7 +2090,8 @@ with tabs[10]:
                            "banner_min_urgency": p_urgency,
                            "explainers": p_explain, "sort_by": p_sort,
                            "positions_shown": 0 if p_shown >= 25 else p_shown,
-                           "mail_actions": p_actions, "app_url": p_url.strip()})
+                           "mail_actions": p_actions, "app_url": p_url.strip(),
+                           "ipo_rules": p_ipo})
             auto_sync()
             st.toast("Settings saved")
             st.rerun()

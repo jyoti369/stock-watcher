@@ -855,6 +855,37 @@ def test_settings_roundtrip_and_defaults(tmp_path, monkeypatch):
     assert settings.load() == settings.DEFAULTS          # corrupt file can't break it
 
 
+def test_ipo_bars_come_from_settings(tmp_path, monkeypatch):
+    """The bars are a judgement call, so they live in settings — and a bad file
+    must fall back per-bar rather than silently rejecting every issue."""
+    from src import ipo, settings
+
+    monkeypatch.setattr(settings, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(settings, "SETTINGS_JSON", tmp_path / "settings.json")
+
+    # the real case this was built for: SME, premium 29.1%, book 102x, QIB 59x
+    row = {"sme": True, "gmp_pct": 29.1, "total": 102.04, "qib": 59.24,
+           "window": "last-day"}
+    assert ipo.verdict(row)[0] == "SKIP"                  # 30% default bar
+
+    settings.save({**settings.load(), "ipo_rules": {
+        "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
+        "sme": {"gmp_pct": 25.0, "total": 20.0, "qib": 2.0}}})
+    assert ipo.verdict(row)[0] == "APPLY-ZONE"            # same row, lower bar
+
+    # mainboard keeps its own set — an SME-shaped premium isn't required of it
+    assert ipo.bars({"sme": False})["gmp_pct"] == 15.0
+    assert ipo.bars({"sme": True})["gmp_pct"] == 25.0
+
+    # junk in the file: each bad bar falls back on its own, the rest survive
+    settings.save({**settings.load(), "ipo_rules": {
+        "sme": {"gmp_pct": "abc", "total": 3000.0, "qib": 4.0}}})
+    sme = ipo.bars({"sme": True})
+    assert sme["gmp_pct"] == 30.0 and sme["total"] == 20.0   # defaults restored
+    assert sme["qib"] == 4.0                                 # good value kept
+    assert ipo.bars({"sme": False}) == settings.DEFAULTS["ipo_rules"]["mainboard"]
+
+
 def test_telegram_rendering():
     from src import tg
 
@@ -978,7 +1009,9 @@ def test_ipo_brief_groups_by_action(monkeypatch):
     assert "Apply for Shiprocket" in b["todo"][0]
     assert "today is the last day, bids close at 4 pm" in b["todo"][0]
     assert "Decide on Dhoot Transmission" in b["todo"][1]
-    assert "needs 15x with QIB 5x+" in b["todo"][1]
+    # the bar quoted is whatever mainboard is set to, not a literal that rots
+    mb = ipo.bars({"sme": False})
+    assert f"needs {mb['total']:g}x with QIB {mb['qib']:g}x+" in b["todo"][1]
     assert not any("Later Co" in t for t in b["todo"])
     assert any("closes Mon" in a or "closes " in a for a in b["act"])
     # the five-rows-of-SKIP table collapses to one line

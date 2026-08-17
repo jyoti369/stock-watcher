@@ -37,7 +37,20 @@ DEFAULTS: dict = {
     # until you say otherwise. The DB's own added_at is no use — it records when
     # the row was rebuilt from committed state, which happens on every deploy.
     "holdings_as_of": "",
+    # The IPO bars, editable because they're a judgement call, not a fact. The
+    # goal they serve: if you're allotted, don't lose money on listing day. So
+    # the premium is a cushion against a weak open, and QIB is the check that
+    # the book is real rather than painted. Separate sets because SME premiums
+    # move on much thinner books than mainboard ones.
+    "ipo_rules": {
+        "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
+        "sme": {"gmp_pct": 30.0, "total": 20.0, "qib": 2.0},
+    },
 }
+
+# what a rule set is allowed to contain, and the sane range for each, so a
+# fat-fingered 300% bar can't silently reject every IPO forever
+IPO_BARS = {"gmp_pct": (0.0, 100.0), "total": (0.0, 200.0), "qib": (0.0, 100.0)}
 
 SORTS = {"value": "biggest holding first",
          "pnl": "biggest profit or loss in rupees",
@@ -57,6 +70,32 @@ def load() -> dict:
 
 def get(key: str):
     return load().get(key, DEFAULTS.get(key))
+
+
+def ipo_rules() -> dict:
+    """The two rule sets, always complete and always in range.
+
+    Read defensively rather than trusting the file: a half-written segment, a
+    string where a number belongs, or a bar someone typed as 3000 all fall back
+    to the default for that one bar instead of breaking the screener. A rule
+    that silently rejects every IPO is worse than a rule that's too loose,
+    because nothing on screen tells you it happened.
+    """
+    saved = load().get("ipo_rules") or {}
+    out = {}
+    for kind, base in DEFAULTS["ipo_rules"].items():
+        got = saved.get(kind) if isinstance(saved, dict) else None
+        got = got if isinstance(got, dict) else {}
+        merged = {}
+        for bar, default in base.items():
+            lo, hi = IPO_BARS[bar]
+            try:
+                val = float(got[bar])
+            except (KeyError, TypeError, ValueError):
+                val = default
+            merged[bar] = default if not lo <= val <= hi else val
+        out[kind] = merged
+    return out
 
 
 def touch_holdings() -> None:
