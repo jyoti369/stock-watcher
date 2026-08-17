@@ -2052,6 +2052,12 @@ with tabs[10]:
                    "brief say apply. All three bars at once — calibrated on 383 "
                    "listings from 2025–26, no issue clearing all three opened "
                    "below its price. Any one alone still lost money.")
+        # streamlit cloud hot-reloads this script on a git pull but keeps
+        # already-imported modules cached — after a deploy that ADDS a
+        # function to settings, the cached module predates it. reload once.
+        if not hasattr(settings, "ipo_rules"):
+            import importlib
+            importlib.reload(settings)
         _bars = settings.ipo_rules()
         p_ipo = {}
         for _kind, _label in (("mainboard", "Mainboard"), ("SME", "SME")):
