@@ -1,50 +1,57 @@
 {
   "307de2dd709f": {
     "triggered": null,
-    "state": 0
-  },
-  "70d9fa078731": {
-    "triggered": "2026-08-14T04:47:10.516370+00:00",
-    "state": 1
+    "state": 0,
+    "true_since": null
   },
   "6ec731ac920d": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "4f8693c9f872": {
     "triggered": "2026-07-24T05:49:54.115295+00:00",
-    "state": 1
+    "state": 1,
+    "true_since": "2026-08-17"
   },
   "4f01157e1465": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "6bf8073ee88e": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "91e4d2ff6bf7": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "436983dc7a83": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "7f637e1282cc": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "1f3dedb30893": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "07cbba9e08d7": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   },
   "7f4958c36254": {
     "triggered": null,
-    "state": 0
+    "state": 0,
+    "true_since": null
   }
 }
