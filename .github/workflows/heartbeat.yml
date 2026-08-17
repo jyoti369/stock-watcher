@@ -1,12 +1,16 @@
 name: daily-heartbeat
 
-# Two digests a day, weekdays. Cron is UTC:
-#   06:35 UTC ≈ 12:05 IST — midday action brief (reminders due + IPO screener),
-#     timed so the whole afternoon is left to apply before ~4:30pm cutoffs
-#   10:15 UTC ≈ 15:45 IST — market digest just after the 15:30 close
+# Three runs a day, weekdays. Cron is UTC:
+#   06:35 UTC = 12:05 IST — midday action brief (reminders due + IPO screener)
+#   09:45 UTC = 15:15 IST — IPO last call: issues closing today, judged on
+#     near-final books (SME subscriptions multiply after 2pm, so the midday
+#     numbers can't clear bars calibrated on closing books). Sends only when
+#     something passes or is one bar away; silence = nothing to decide.
+#   10:15 UTC = 15:45 IST — market digest just after the 15:30 close
 on:
   schedule:
     - cron: "35 6 * * 1-5"
+    - cron: "45 9 * * 1-5"
     - cron: "15 10 * * 1-5"
   workflow_dispatch:
 
@@ -37,9 +41,13 @@ jobs:
           STOCKWATCH_STATE_KEY: ${{ secrets.STOCKWATCH_STATE_KEY }}
         run: |
           python -m src.repo_state import
-          # before 09 UTC it's the midday IST slot -> morning brief
-          if [ "$(date -u +%H)" -lt 9 ]; then
+          # route by UTC hour: <09 midday brief, 09 = 15:15 IST last call,
+          # anything later is the after-close digest
+          H="$(date -u +%H)"
+          if [ "$H" -lt 9 ]; then
             python -m src.heartbeat morning
+          elif [ "$H" -eq 9 ]; then
+            python -m src.heartbeat lastcall
           else
             python -m src.heartbeat
           fi

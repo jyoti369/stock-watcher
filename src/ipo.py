@@ -440,7 +440,44 @@ def brief(today: date | None = None, now: datetime | None = None) -> dict:
     # a count, not a roll-call: naming five issues you're not applying for is
     # five names to read and nothing to decide
     skip = (f"{len(skipped)} others below the bar." if skipped else None)
-    # the HTML mail draws its own table, so it gets the rows too — same numbers,
-    # just not pre-strung into sentences
+    # last-day issues that fail at MIDDAY aren't decided yet: SME books multiply
+    # in the final hours (LAPL read 55x at noon and closed 241x), so the noon
+    # numbers can't be measured against bars calibrated on closing books. The
+    # 15:15 last-call run makes the real decision; the brief just says so.
+    pending = len([t for t in table if t["last_day"] and t["verdict"] != "APPLY-ZONE"])
     return {"act": act, "watch": watch, "skip": skip, "footer": footer,
-            "todo": todo, "rows": table}
+            "todo": todo, "rows": table, "lastday_pending": pending}
+
+
+def last_call(now: datetime | None = None) -> dict:
+    """The 3:15pm decision on anything closing today, judged on near-final books.
+
+    Returns {apply, close, footer}. `apply` = rows passing every bar — act now.
+    `close` = rows where exactly one bar misses by a fifth or less — the numbers
+    are laid out for a human judgement call, since a book at 3:15 can still add
+    the last stretch by 4pm. Anything further off is silence, not a section.
+    """
+    now = now or clock.ist_now()
+    rows = [r for r in screen()
+            if (r.get("window") or window(r, now)) == "last-day"]
+    out = {"apply": [], "close": [], "footer": ""}
+    for r in rows:
+        bar, verdict_ = bars(r), r["verdict"]
+        if verdict_ == "APPLY-ZONE":
+            out["apply"].append(r)
+            continue
+        vals = {"gmp_pct": r.get("gmp_pct"), "total": r.get("total"),
+                "qib": r.get("qib")}
+        if any(v is None for v in vals.values()):
+            continue
+        misses = {k: v for k, v in vals.items() if v < bar[k]}
+        if len(misses) == 1:
+            k, v = next(iter(misses.items()))
+            if v >= 0.8 * bar[k]:
+                r["near"] = (k, v, bar[k])
+                out["close"].append(r)
+    upd = next((r["updated"] for r in rows if r.get("updated")), "")
+    if rows:
+        out["footer"] = (str(rows[0].get("source", "?"))
+                         + (f", as of {upd}" if upd else ""))
+    return out

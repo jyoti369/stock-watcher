@@ -587,6 +587,13 @@ def send_morning() -> list[str]:
         # nothing clears the bar: that's one line, not a section with a header
         # over a list of things you're not buying
         line = f"🎯 {ipos['skip'].replace(' others below the bar.', ' open IPOs, none clear the bar.')}"
+        # ...but an issue closing TODAY isn't decided by its midday book — SME
+        # subscriptions multiply after 2pm, so the verdict that counts comes
+        # from the 3:15 last-call alert, and the brief should say so.
+        if ipos.get("lastday_pending"):
+            n = ipos["lastday_pending"]
+            line += (f" {n} of them close today — final numbers come in the "
+                     f"3:15 pm last call.")
         sections.append(line)
         html_blocks.append(mailhtml.note(line))
         tg_parts.append(f"<i>{tg.esc(line)}</i>")
@@ -664,5 +671,80 @@ def send_morning() -> list[str]:
     return channels
 
 
+_BAR_WORDS = {"gmp_pct": "premium", "total": "book", "qib": "QIB"}
+
+
+def send_ipo_lastcall() -> list[str]:
+    """The 15:15 IST last call on IPOs closing today.
+
+    Exists because the bars are calibrated on closing books and the midday
+    brief can only see midday books — SME subscriptions multiply in the final
+    hours. Sends nothing at all unless there's a decision to make: every bar
+    passed (apply now), or exactly one bar within a fifth of its line (your
+    judgement, laid out). Silence means today's closers stayed below the bar.
+    """
+    try:
+        lc = ipo.last_call()
+    except Exception as e:
+        print(f"[heartbeat] last call skipped, screener errored: {str(e)[:100]}")
+        return []
+    if not lc["apply"] and not lc["close"]:
+        print("[heartbeat] last call: nothing passing or close, staying silent")
+        return []
+
+    lines, tg_parts, html_blocks = [], [], []
+    for r in lc["apply"]:
+        kind = "SME" if r.get("sme") else "mainboard"
+        line = (f"{r['name']} ({kind}) — {ipo.numbers_phrase(r, compact=True)}. "
+                f"Every bar passed. Apply before 4 pm, one lot, one PAN.")
+        lines.append("🚨 " + line)
+        tg_parts.append(f"🚨 {tg.b(tg.esc(r['name']))} — "
+                        f"{tg.esc(ipo.numbers_phrase(r, compact=True))}\n"
+                        f"every bar passed · <b>apply before 4 pm</b>, 1 lot")
+        html_blocks.append(mailhtml.section(
+            f"Apply: {r['name']}",
+            mailhtml.bullets([ipo.numbers_phrase(r),
+                              "Every bar passed — one lot, one PAN, before 4 pm."]),
+            "act"))
+    for r in lc["close"]:
+        k, v, need = r["near"]
+        word = _BAR_WORDS.get(k, k)
+        fmt = (lambda x: f"{x:g}%") if k == "gmp_pct" else (lambda x: f"{x:g}x")
+        line = (f"{r['name']} — {ipo.numbers_phrase(r, compact=True)}. "
+                f"Only the {word} misses: {fmt(v)} against {fmt(need)}. "
+                f"Books can still fill by 4 pm — your call.")
+        lines.append("🤏 " + line)
+        tg_parts.append(f"🤏 {tg.b(tg.esc(r['name']))} — "
+                        f"{tg.esc(ipo.numbers_phrase(r, compact=True))}\n"
+                        f"only the {word} misses ({tg.esc(fmt(v))} vs "
+                        f"{tg.esc(fmt(need))}) · <i>your call, 4 pm</i>")
+        html_blocks.append(mailhtml.section(
+            f"Close: {r['name']}",
+            mailhtml.bullets([ipo.numbers_phrase(r),
+                              f"Only the {word} misses — {fmt(v)} against "
+                              f"{fmt(need)}. Books can still fill by 4 pm."]),
+            "warn"))
+
+    stamp = clock.clock_time()
+    body = (f"IPO last call · {stamp} IST\n\n" + "\n".join(lines)
+            + (f"\n\n{lc['footer']}" if lc["footer"] else ""))
+    subject = f"🎯 {brand.NAME}: IPO last call — closes 4 pm today"
+    html_body = mailhtml.page(
+        "IPO last call", f"{stamp} IST — bids close at 4 pm",
+        html_blocks, lc["footer"])
+    tg_text = tg.clip(f"{tg.b('🎯 IPO last call')} · {tg.esc(stamp)} IST\n\n"
+                      + "\n\n".join(tg_parts))
+    channels = alerts.dispatch(subject, body, html_body=html_body,
+                               tg_text=tg_text)
+    db.log_alert(None, "DIGEST", "-", "ipo last call", channels)
+    print(f"[heartbeat] last call sent to {channels or 'no channel configured'}")
+    return channels
+
+
 if __name__ == "__main__":
-    send_morning() if "morning" in sys.argv[1:] else send_daily()
+    if "morning" in sys.argv[1:]:
+        send_morning()
+    elif "lastcall" in sys.argv[1:]:
+        send_ipo_lastcall()
+    else:
+        send_daily()

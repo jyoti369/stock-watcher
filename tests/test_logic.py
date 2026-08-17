@@ -914,6 +914,41 @@ def test_ipo_bars_come_from_settings(tmp_path, monkeypatch):
     assert ipo.bars({"sme": False}) == settings.DEFAULTS["ipo_rules"]["mainboard"]
 
 
+def test_ipo_last_call(monkeypatch):
+    """The 15:15 run: apply on a full pass, lay out a one-bar near miss, stay
+    silent on everything else — and never treat a not-last-day issue as urgent."""
+    from datetime import datetime
+
+    from src import clock, ipo
+
+    passing = {"name": "Deep Book", "sme": True, "gmp_pct": 40.0,
+               "total": 180.0, "qib": 60.0, "window": "last-day",
+               "verdict": "APPLY-ZONE", "updated": "17th Aug 15:10",
+               "source": "investorgain.com (live)"}
+    near = {"name": "Almost", "sme": True, "gmp_pct": 40.0,
+            "total": 85.0, "qib": 60.0, "window": "last-day",
+            "verdict": "SKIP", "updated": "", "source": "x"}      # book 85 vs 100
+    far = {"name": "Nowhere", "sme": True, "gmp_pct": 4.0,
+           "total": 2.0, "qib": 1.0, "window": "last-day",
+           "verdict": "SKIP", "updated": "", "source": "x"}
+    tomorrow = {"name": "Later", "sme": True, "gmp_pct": 40.0,
+                "total": 85.0, "qib": 60.0, "window": "open",
+                "verdict": "SKIP", "updated": "", "source": "x"}
+    monkeypatch.setattr(ipo, "screen", lambda: [passing, near, far, tomorrow])
+
+    lc = ipo.last_call(datetime(2026, 8, 17, 15, 15, tzinfo=clock.IST))
+    assert [r["name"] for r in lc["apply"]] == ["Deep Book"]
+    assert [r["name"] for r in lc["close"]] == ["Almost"]
+    assert lc["close"][0]["near"] == ("total", 85.0, 100.0)
+    assert "investorgain" in lc["footer"]
+
+    # two bars missing is not "close", it's silence — no half-invitations
+    near2 = dict(near, qib=30.0)                       # book AND qib short
+    monkeypatch.setattr(ipo, "screen", lambda: [near2])
+    lc = ipo.last_call(datetime(2026, 8, 17, 15, 15, tzinfo=clock.IST))
+    assert lc["apply"] == [] and lc["close"] == []
+
+
 def test_telegram_rendering():
     from src import tg
 
