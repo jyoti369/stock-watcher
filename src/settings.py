@@ -37,14 +37,27 @@ DEFAULTS: dict = {
     # until you say otherwise. The DB's own added_at is no use — it records when
     # the row was rebuilt from committed state, which happens on every deploy.
     "holdings_as_of": "",
-    # The IPO bars, editable because they're a judgement call, not a fact. The
-    # goal they serve: if you're allotted, don't lose money on listing day. So
-    # the premium is a cushion against a weak open, and QIB is the check that
-    # the book is real rather than painted. Separate sets because SME premiums
-    # move on much thinner books than mainboard ones.
+    # The IPO bars. Goal they serve: if you're allotted, don't lose money on
+    # listing day. Calibrated 17 Aug 2026 against 150 IPOs that listed in 2026
+    # (chittorgarh report 98: subscription by category + actual open price),
+    # cross-checked against 1,238 listings since 2022 (investorgain 334).
+    #
+    # What that data said, and it was not what either of us guessed:
+    #   * 31% of 2026 listings opened BELOW the issue price. Median open was
+    #     only +2.6%. The flip is not free money any more — 2023 ran 7-14%
+    #     down, 2025-26 runs 25-41%.
+    #   * Subscription depth, not the grey-market premium, is what separates
+    #     the winners. Mainboard QIB 10-25x still lost half the time; SME QIB
+    #     10-25x lost 53% of the time.
+    #   * These pairs had ZERO losing opens in the sample:
+    #       mainboard QIB >= 10x and total >= 20x  (n=11, median +35.8%)
+    #       SME       QIB >= 20x and total >= 80x  (n=23, median +39.1%)
+    # The premium floors below are deliberately LOW: nothing archives GMP per
+    # IPO, so that bar is the one still uncalibrated. It's a sanity check that
+    # the grey market hasn't given up on the issue, not the deciding number.
     "ipo_rules": {
-        "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
-        "sme": {"gmp_pct": 30.0, "total": 20.0, "qib": 2.0},
+        "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
+        "sme": {"gmp_pct": 15.0, "total": 80.0, "qib": 20.0},
     },
 }
 

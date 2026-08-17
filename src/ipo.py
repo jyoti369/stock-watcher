@@ -5,14 +5,23 @@ predict a pop are grey-market premium (unofficial, manipulable — especially in
 SME issues) and subscription depth (QIB interest is the anti-manipulation
 check, since institutions don't touch rigged books). Hence two rule sets:
 
-  Mainboard: GMP >= 15%, total sub >= 10x, QIB >= 5x.
-  SME:       GMP >= 30%, total sub >= 20x, QIB >= 2x.
+  Mainboard: QIB >= 10x, total >= 20x, GMP >= 10%.
+  SME:       QIB >= 20x, total >= 80x, GMP >= 15%.
              (min application ~Rs 1L+, allotment is a lottery — size for it)
 
+Those bars are calibrated, not guessed: see settings.DEFAULTS["ipo_rules"] for
+the sample and the numbers behind them. The short version is that subscription
+depth predicts the open and the grey-market premium mostly doesn't, so the
+premium floors sit low and QIB does the work.
+
+Timing matters as much as the bars. SME books fill in the last hours of the
+last day — LAPL Automotive read 55x total with QIB 3.6x when the app looked on
+the morning of 10 Aug 2026 and closed at 241x with QIB 81x. Judge an issue
+between 3pm and 3:45pm on its final day, not in the morning: allotment odds
+don't depend on when you bid, so waiting is free information.
+
 Those are the shipped defaults; the live numbers come from settings.ipo_rules()
-and are editable in the Settings tab. The premium bar is what protects you from
-a weak open if you're allotted, which is why SME's sits higher: the same premium
-means less on a book a fraction of the size.
+and are editable in the Settings tab.
 
 Always apply on the LAST day, late morning: allotment odds don't depend on
 when you bid, so waiting is free information. One lot per PAN — extra lots
@@ -46,8 +55,8 @@ _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 # from settings.ipo_rules() — they're a judgement call you tune as tickets
 # accumulate, not a constant of nature, so they belong in the Settings tab.
 RULES = {
-    "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
-    "sme": {"gmp_pct": 30.0, "total": 20.0, "qib": 2.0},
+    "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
+    "sme": {"gmp_pct": 15.0, "total": 80.0, "qib": 20.0},
 }
 
 
@@ -292,9 +301,13 @@ def verdict(row: dict) -> tuple[str, str]:
         notes.append(f"QIB {qib:g}x")
 
     if not misses:
-        return "APPLY-ZONE", "; ".join(notes) + " — apply LAST day, 1 lot"
-    # GMP already there but the book still filling = the classic day-1/2 state
-    if pct is not None and pct >= rules["gmp_pct"]:
+        return "APPLY-ZONE", "; ".join(notes) + " — apply late on the LAST day, 1 lot"
+    # GMP already there but the book still filling = the classic day-1/2 state.
+    # Only until the last day, though: "recheck later" is useless advice when
+    # there is no later, and a fat premium on a thin book is precisely the
+    # profile that opened below issue price half the time in 2026.
+    if (pct is not None and pct >= rules["gmp_pct"]
+            and row.get("window") not in ("last-day", "shut")):
         return "WATCH", "GMP qualifies; recheck subscription on the last day (" \
             + "; ".join(misses) + ")"
     return "SKIP", "; ".join(misses)

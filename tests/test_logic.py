@@ -510,12 +510,27 @@ def test_ipo_verdicts():
     # good GMP but book still filling -> watch, not skip
     v, _ = ipo.verdict({"sme": False, "gmp_pct": 30.0, "total": 0.4, "qib": 0.1})
     assert v == "WATCH"
-    # retail froth without QIBs fails the honesty check
+    # retail froth without QIBs: watch early on, but a firm no once it's the
+    # last day — there is no "recheck later" left, and this is the losing profile
     v, why = ipo.verdict({"sme": False, "gmp_pct": 25.0, "total": 30.0, "qib": 1.0})
     assert v == "WATCH" and "QIB" in why
-    # SME bars are stricter: 25% GMP passes mainboard but not SME
-    assert ipo.verdict({"sme": True, "gmp_pct": 25.0, "total": 60.0, "qib": 4.0})[0] == "SKIP"
-    assert ipo.verdict({"sme": True, "gmp_pct": 39.0, "total": 55.0, "qib": 3.6})[0] == "APPLY-ZONE"
+    v, why = ipo.verdict({"sme": False, "gmp_pct": 25.0, "total": 30.0, "qib": 1.0,
+                          "window": "last-day"})
+    assert v == "SKIP" and "QIB" in why
+    # SME bars are stricter, so a book that clears mainboard need not clear SME:
+    # 60x with QIB 4x is fine for mainboard and nowhere near the SME bar
+    assert ipo.verdict({"sme": False, "gmp_pct": 25.0, "total": 60.0,
+                        "qib": 12.0, "window": "last-day"})[0] == "APPLY-ZONE"
+    assert ipo.verdict({"sme": True, "gmp_pct": 25.0, "total": 60.0,
+                        "qib": 4.0, "window": "last-day"})[0] == "SKIP"
+    # LAPL Automotive, the ticket that listed +43.6%: judged on the numbers the
+    # app saw on the morning of its last day it fails, and judged on where the
+    # book actually closed it passes. Same issue — this is why the call belongs
+    # at 3pm on the final day, not in the morning.
+    assert ipo.verdict({"sme": True, "gmp_pct": 39.0, "total": 55.0,
+                        "qib": 3.6, "window": "last-day"})[0] == "SKIP"
+    assert ipo.verdict({"sme": True, "gmp_pct": 39.0, "total": 241.4,
+                        "qib": 81.0})[0] == "APPLY-ZONE"
     # nothing known
     assert ipo.verdict({"sme": False, "gmp_pct": None, "total": None})[0] == "NO DATA"
 
@@ -863,26 +878,34 @@ def test_ipo_bars_come_from_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "STATE_DIR", tmp_path)
     monkeypatch.setattr(settings, "SETTINGS_JSON", tmp_path / "settings.json")
 
-    # the real case this was built for: SME, premium 29.1%, book 102x, QIB 59x
+    # Credent Connect, 17 Aug 2026: premium 29.1% (under the old 30% bar that
+    # said SKIP) but QIB 59x on a 102x book — the profile that had zero losing
+    # opens in the 2026 sample. The calibrated bars must call this one APPLY.
     row = {"sme": True, "gmp_pct": 29.1, "total": 102.04, "qib": 59.24,
            "window": "last-day"}
-    assert ipo.verdict(row)[0] == "SKIP"                  # 30% default bar
+    assert ipo.verdict(row)[0] == "APPLY-ZONE"
+
+    # the pattern the data says actually loses: thin institutional demand, and
+    # a premium alone doesn't rescue it
+    weak = {"sme": True, "gmp_pct": 45.0, "total": 30.0, "qib": 1.5,
+            "window": "last-day"}
+    assert ipo.verdict(weak)[0] == "SKIP"
 
     settings.save({**settings.load(), "ipo_rules": {
-        "mainboard": {"gmp_pct": 15.0, "total": 10.0, "qib": 5.0},
-        "sme": {"gmp_pct": 25.0, "total": 20.0, "qib": 2.0}}})
-    assert ipo.verdict(row)[0] == "APPLY-ZONE"            # same row, lower bar
+        "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
+        "sme": {"gmp_pct": 50.0, "total": 80.0, "qib": 20.0}}})
+    assert ipo.verdict(row)[0] == "SKIP"                  # same row, raised bar
 
-    # mainboard keeps its own set — an SME-shaped premium isn't required of it
-    assert ipo.bars({"sme": False})["gmp_pct"] == 15.0
-    assert ipo.bars({"sme": True})["gmp_pct"] == 25.0
+    # mainboard keeps its own set — SME's deeper book isn't required of it
+    assert ipo.bars({"sme": False})["total"] == 20.0
+    assert ipo.bars({"sme": True})["total"] == 80.0
 
     # junk in the file: each bad bar falls back on its own, the rest survive
     settings.save({**settings.load(), "ipo_rules": {
-        "sme": {"gmp_pct": "abc", "total": 3000.0, "qib": 4.0}}})
+        "sme": {"gmp_pct": "abc", "total": 3000.0, "qib": 40.0}}})
     sme = ipo.bars({"sme": True})
-    assert sme["gmp_pct"] == 30.0 and sme["total"] == 20.0   # defaults restored
-    assert sme["qib"] == 4.0                                 # good value kept
+    assert sme["gmp_pct"] == 15.0 and sme["total"] == 80.0   # defaults restored
+    assert sme["qib"] == 40.0                                # good value kept
     assert ipo.bars({"sme": False}) == settings.DEFAULTS["ipo_rules"]["mainboard"]
 
 
