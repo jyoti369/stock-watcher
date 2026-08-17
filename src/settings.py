@@ -37,33 +37,34 @@ DEFAULTS: dict = {
     # until you say otherwise. The DB's own added_at is no use — it records when
     # the row was rebuilt from committed state, which happens on every deploy.
     "holdings_as_of": "",
-    # The IPO bars. Goal they serve: if you're allotted, don't lose money on
-    # listing day. Calibrated 17 Aug 2026 against 150 IPOs that listed in 2026
-    # (chittorgarh report 98: subscription by category + actual open price),
-    # cross-checked against 1,238 listings since 2022 (investorgain 334).
+    # The IPO bars. Goal they serve: if you're allotted, don't lose money
+    # selling in the first 15 minutes of listing day. Calibrated 17 Aug 2026
+    # on 2025+2026: chittorgarh report 98 (QIB/total by issue + open price,
+    # 519 listings) JOINED with investorgain report 377 (final GMP + listing
+    # price, 536) — 383 issues carry all four numbers and both sources agree
+    # on the outcome. Judged on the OPEN, never the day's peak.
     #
-    # What that data said, and it was not what either of us guessed:
-    #   * 31% of 2026 listings opened BELOW the issue price. Median open was
-    #     only +2.6%. The flip is not free money any more — 2023 ran 7-14%
-    #     down, 2025-26 runs 25-41%.
-    #   * Subscription depth, not the grey-market premium, is what separates
-    #     the winners. Mainboard QIB 10-25x still lost half the time; SME QIB
-    #     10-25x lost 53% of the time.
-    #   * These pairs had ZERO losing opens in the sample:
-    #       mainboard QIB >= 10x and total >= 20x  (n=11, median +35.8%)
-    #       SME       QIB >= 20x and total >= 80x  (n=23, median +39.1%)
-    # The premium floors below are deliberately LOW: nothing archives GMP per
-    # IPO, so that bar is the one still uncalibrated. It's a sanity check that
-    # the grey market hasn't given up on the issue, not the deciding number.
+    # All three bars earn their place; no pair is enough:
+    #   * GMP alone fails:  SME gmp>=35% still had a -20% open (thin book).
+    #   * book alone fails: SME QIB>=20x & total>=80x still had -3.3% and
+    #     -4.6% opens when the premium was middling.
+    #   * together, zero losing opens in the sample:
+    #       mainboard QIB>=20x total>=30x gmp>=15%  n=31, median +27.6%,
+    #         worst +10.0%
+    #       SME       QIB>=35x total>=100x gmp>=25% n=48, median +59.6%,
+    #         worst +9.9%
+    # Base rate these fight: ~40% of all 2025-26 listings opened at or below
+    # the issue price. The bars are strict because the market stopped being
+    # kind, not because the strategy changed.
     "ipo_rules": {
-        "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
-        "sme": {"gmp_pct": 15.0, "total": 80.0, "qib": 20.0},
+        "mainboard": {"gmp_pct": 15.0, "total": 30.0, "qib": 20.0},
+        "sme": {"gmp_pct": 25.0, "total": 100.0, "qib": 35.0},
     },
 }
 
 # what a rule set is allowed to contain, and the sane range for each, so a
 # fat-fingered 300% bar can't silently reject every IPO forever
-IPO_BARS = {"gmp_pct": (0.0, 100.0), "total": (0.0, 200.0), "qib": (0.0, 100.0)}
+IPO_BARS = {"gmp_pct": (0.0, 100.0), "total": (0.0, 500.0), "qib": (0.0, 200.0)}
 
 SORTS = {"value": "biggest holding first",
          "pnl": "biggest profit or loss in rupees",

@@ -505,7 +505,7 @@ def test_ipo_verdicts():
     from src import ipo
 
     # mainboard passing every bar
-    v, why = ipo.verdict({"sme": False, "gmp_pct": 28.0, "total": 40.0, "qib": 12.0})
+    v, why = ipo.verdict({"sme": False, "gmp_pct": 28.0, "total": 40.0, "qib": 25.0})
     assert v == "APPLY-ZONE" and "1 lot" in why
     # good GMP but book still filling -> watch, not skip
     v, _ = ipo.verdict({"sme": False, "gmp_pct": 30.0, "total": 0.4, "qib": 0.1})
@@ -518,11 +518,11 @@ def test_ipo_verdicts():
                           "window": "last-day"})
     assert v == "SKIP" and "QIB" in why
     # SME bars are stricter, so a book that clears mainboard need not clear SME:
-    # 60x with QIB 4x is fine for mainboard and nowhere near the SME bar
+    # 60x with QIB 22x is fine for mainboard and nowhere near the SME bar
     assert ipo.verdict({"sme": False, "gmp_pct": 25.0, "total": 60.0,
-                        "qib": 12.0, "window": "last-day"})[0] == "APPLY-ZONE"
+                        "qib": 22.0, "window": "last-day"})[0] == "APPLY-ZONE"
     assert ipo.verdict({"sme": True, "gmp_pct": 25.0, "total": 60.0,
-                        "qib": 4.0, "window": "last-day"})[0] == "SKIP"
+                        "qib": 22.0, "window": "last-day"})[0] == "SKIP"
     # LAPL Automotive, the ticket that listed +43.6%: judged on the numbers the
     # app saw on the morning of its last day it fails, and judged on where the
     # book actually closed it passes. Same issue — this is why the call belongs
@@ -878,33 +878,38 @@ def test_ipo_bars_come_from_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "STATE_DIR", tmp_path)
     monkeypatch.setattr(settings, "SETTINGS_JSON", tmp_path / "settings.json")
 
-    # Credent Connect, 17 Aug 2026: premium 29.1% (under the old 30% bar that
-    # said SKIP) but QIB 59x on a 102x book — the profile that had zero losing
-    # opens in the 2026 sample. The calibrated bars must call this one APPLY.
+    # Credent Connect, 17 Aug 2026 (applied): premium 29.1%, QIB 59x on a 102x
+    # book — inside the triple that had zero losing opens across 2025+2026.
     row = {"sme": True, "gmp_pct": 29.1, "total": 102.04, "qib": 59.24,
            "window": "last-day"}
     assert ipo.verdict(row)[0] == "APPLY-ZONE"
 
-    # the pattern the data says actually loses: thin institutional demand, and
-    # a premium alone doesn't rescue it
-    weak = {"sme": True, "gmp_pct": 45.0, "total": 30.0, "qib": 1.5,
-            "window": "last-day"}
-    assert ipo.verdict(weak)[0] == "SKIP"
+    # Asston Pharma, the loss the premium floor exists for: deep book (130x,
+    # QIB 35x) but a 21% premium, opened -3.3% on 16 Jul 2025
+    asston = {"sme": True, "gmp_pct": 21.1, "total": 130.3, "qib": 34.9,
+              "window": "last-day"}
+    assert ipo.verdict(asston)[0] == "SKIP"
+
+    # Rukmani Devi, the loss the book bars exist for: 36% premium on a thin
+    # book (30x, QIB 8x), opened -20% on 6 Oct 2025
+    rukmani = {"sme": True, "gmp_pct": 36.4, "total": 29.6, "qib": 8.2,
+               "window": "last-day"}
+    assert ipo.verdict(rukmani)[0] == "SKIP"
 
     settings.save({**settings.load(), "ipo_rules": {
-        "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
-        "sme": {"gmp_pct": 50.0, "total": 80.0, "qib": 20.0}}})
+        "mainboard": {"gmp_pct": 15.0, "total": 30.0, "qib": 20.0},
+        "sme": {"gmp_pct": 50.0, "total": 100.0, "qib": 35.0}}})
     assert ipo.verdict(row)[0] == "SKIP"                  # same row, raised bar
 
     # mainboard keeps its own set — SME's deeper book isn't required of it
-    assert ipo.bars({"sme": False})["total"] == 20.0
-    assert ipo.bars({"sme": True})["total"] == 80.0
+    assert ipo.bars({"sme": False})["total"] == 30.0
+    assert ipo.bars({"sme": True})["total"] == 100.0
 
     # junk in the file: each bad bar falls back on its own, the rest survive
     settings.save({**settings.load(), "ipo_rules": {
         "sme": {"gmp_pct": "abc", "total": 3000.0, "qib": 40.0}}})
     sme = ipo.bars({"sme": True})
-    assert sme["gmp_pct"] == 15.0 and sme["total"] == 80.0   # defaults restored
+    assert sme["gmp_pct"] == 25.0 and sme["total"] == 100.0  # defaults restored
     assert sme["qib"] == 40.0                                # good value kept
     assert ipo.bars({"sme": False}) == settings.DEFAULTS["ipo_rules"]["mainboard"]
 

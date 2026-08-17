@@ -5,14 +5,15 @@ predict a pop are grey-market premium (unofficial, manipulable — especially in
 SME issues) and subscription depth (QIB interest is the anti-manipulation
 check, since institutions don't touch rigged books). Hence two rule sets:
 
-  Mainboard: QIB >= 10x, total >= 20x, GMP >= 10%.
-  SME:       QIB >= 20x, total >= 80x, GMP >= 15%.
+  Mainboard: QIB >= 20x, total >= 30x, GMP >= 15%.
+  SME:       QIB >= 35x, total >= 100x, GMP >= 25%.
              (min application ~Rs 1L+, allotment is a lottery — size for it)
 
-Those bars are calibrated, not guessed: see settings.DEFAULTS["ipo_rules"] for
-the sample and the numbers behind them. The short version is that subscription
-depth predicts the open and the grey-market premium mostly doesn't, so the
-premium floors sit low and QIB does the work.
+Those bars are calibrated on 2025+2026 listings, not guessed: see
+settings.DEFAULTS["ipo_rules"] for the sample. The short version: neither the
+premium nor the book is enough alone — a 35% premium on a thin book still
+opened -20%, and a deep book with a middling premium still opened negative —
+but the three bars together had zero losing opens across 383 issues.
 
 Timing matters as much as the bars. SME books fill in the last hours of the
 last day — LAPL Automotive read 55x total with QIB 3.6x when the app looked on
@@ -55,8 +56,8 @@ _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 # from settings.ipo_rules() — they're a judgement call you tune as tickets
 # accumulate, not a constant of nature, so they belong in the Settings tab.
 RULES = {
-    "mainboard": {"gmp_pct": 10.0, "total": 20.0, "qib": 10.0},
-    "sme": {"gmp_pct": 15.0, "total": 80.0, "qib": 20.0},
+    "mainboard": {"gmp_pct": 15.0, "total": 30.0, "qib": 20.0},
+    "sme": {"gmp_pct": 25.0, "total": 100.0, "qib": 35.0},
 }
 
 
