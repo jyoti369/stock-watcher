@@ -1,26 +1,42 @@
 name: daily-heartbeat
 
-# Three runs a day, weekdays. Cron is UTC:
-#   06:35 UTC = 12:05 IST — midday action brief (reminders due + IPO screener)
-#   09:45 UTC = 15:15 IST — IPO last call: issues closing today, judged on
-#     near-final books (SME subscriptions multiply after 2pm, so the midday
-#     numbers can't clear bars calibrated on closing books). Sends only when
-#     something passes or is one bar away; silence = nothing to decide.
-#   10:15 UTC = 15:45 IST — market digest just after the 15:30 close
+# Three sends a day, weekdays — but GitHub's cron is a queue, not a clock:
+# measured over Aug 2026 the 06:35 cron fired 57-85 minutes late and the
+# 10:15 one 32-65 minutes late, every single day. A 09:45 cron for the last
+# call would land AFTER the 4pm bid cutoff. So every job is scheduled ~100
+# minutes EARLY and sleeps until its exact target; queue delay then eats the
+# buffer, not the deadline. Routing is by which cron fired, never wall clock.
+#
+#   cron 04:55 UTC -> waits until 06:35 UTC = 12:05 IST  midday brief
+#   cron 07:55 UTC -> waits until 09:45 UTC = 15:15 IST  IPO last call
+#   cron 08:40 UTC -> waits until 09:48 UTC = 15:18 IST  last-call FALLBACK:
+#     GitHub occasionally drops a scheduled run outright, and the last call
+#     is the one send with a hard deadline (bids shut 4pm). The fallback
+#     pulls state and exits if the primary's sent-marker is already today.
+#   cron 08:50 UTC -> waits until 10:15 UTC = 15:45 IST  after-close digest
 on:
   schedule:
-    - cron: "35 6 * * 1-5"
-    - cron: "45 9 * * 1-5"
-    - cron: "15 10 * * 1-5"
+    - cron: "55 4 * * 1-5"
+    - cron: "55 7 * * 1-5"
+    - cron: "40 8 * * 1-5"
+    - cron: "50 8 * * 1-5"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "which send to run now (no waiting)"
+        type: choice
+        options: [daily, morning, lastcall]
+        default: daily
 
-# the midday run logs tracked shop prices back into state/
+# the midday run logs tracked shop prices back into state/; the last call
+# commits its sent-marker so the fallback run can tell it already happened
 permissions:
   contents: write
 
 jobs:
   digest:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +45,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-watcher.txt
       - run: pip install -r requirements-watcher.txt
-      - name: send daily digest
+      - name: send at the target minute
         env:
           STOCKWATCH_TG_TOKEN: ${{ secrets.STOCKWATCH_TG_TOKEN }}
           STOCKWATCH_TG_CHAT: ${{ secrets.STOCKWATCH_TG_CHAT }}
@@ -40,26 +56,49 @@ jobs:
           # absent = that section is silently skipped, nothing else changes
           STOCKWATCH_STATE_KEY: ${{ secrets.STOCKWATCH_STATE_KEY }}
         run: |
+          # which cron fired decides the job — a delayed runner must not be
+          # re-routed to a different send by the hour it happens to start in
+          case "${{ github.event.schedule }}" in
+            "55 4 * * 1-5") MODE=morning;  TARGET=0635 ;;
+            "55 7 * * 1-5") MODE=lastcall; TARGET=0945 ;;
+            "40 8 * * 1-5") MODE=lastcall; TARGET=0948; FALLBACK=1 ;;
+            "50 8 * * 1-5") MODE=daily;    TARGET=1015 ;;
+            *) MODE="${{ inputs.mode || 'daily' }}"; TARGET= ;;  # manual run: now
+          esac
+          echo "mode=$MODE target=${TARGET:-immediately} (started $(date -u +%H:%M) UTC)"
+          # sleep to the exact target minute; if the queue already ate the
+          # whole buffer, send immediately — late beats never
+          if [ -n "$TARGET" ]; then
+            while [ "$(date -u +%H%M)" \< "$TARGET" ]; do sleep 20; done
+          fi
+          if [ -n "$FALLBACK" ]; then
+            git pull -q --rebase origin main || true
+            if [ "$(cat state/lastcall_sent 2>/dev/null)" = "$(date -u +%F)" ]; then
+              echo "primary last call already ran today — nothing to do"
+              exit 0
+            fi
+            echo "primary last call missing — fallback is sending"
+          fi
           python -m src.repo_state import
-          # route by UTC hour: <09 midday brief, 09 = 15:15 IST last call,
-          # anything later is the after-close digest
-          H="$(date -u +%H)"
-          if [ "$H" -lt 9 ]; then
+          if [ "$MODE" = morning ]; then
             python -m src.heartbeat morning
-          elif [ "$H" -eq 9 ]; then
+          elif [ "$MODE" = lastcall ]; then
             python -m src.heartbeat lastcall
+            # marker means "the 15:15 evaluation happened", sent or silent
+            date -u +%F > state/lastcall_sent
           else
             python -m src.heartbeat
           fi
-      - name: commit tracked-price points
+      - name: commit state (tracked prices, last-call marker)
         run: |
           git config user.name "stock-watcher-bot"
           git config user.email "actions@users.noreply.github.com"
           git add state/shop_watch.json 2>/dev/null || true
+          git add state/lastcall_sent 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "no tracked-price change"
+            echo "no state change"
           else
-            git commit -m "chore: log tracked prices [skip ci]"
+            git commit -m "chore: update heartbeat state [skip ci]"
             git pull --rebase origin main
             git push
           fi
