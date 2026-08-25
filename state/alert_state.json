@@ -16,8 +16,8 @@
   },
   "4f01157e1465": {
     "triggered": "2026-08-25T03:47:02.493947+00:00",
-    "state": 1,
-    "true_since": "2026-08-25"
+    "state": 0,
+    "true_since": null
   },
   "6bf8073ee88e": {
     "triggered": null,
