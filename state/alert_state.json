@@ -1,8 +1,8 @@
 {
   "307de2dd709f": {
     "triggered": "2026-08-27T13:47:58.364014+00:00",
-    "state": 1,
-    "true_since": "2026-08-27"
+    "state": 0,
+    "true_since": null
   },
   "6ec731ac920d": {
     "triggered": null,
