@@ -5,9 +5,9 @@
     "true_since": null
   },
   "6ec731ac920d": {
-    "triggered": null,
-    "state": 0,
-    "true_since": null
+    "triggered": "2026-09-15T13:46:20.707606+00:00",
+    "state": 1,
+    "true_since": "2026-09-15"
   },
   "4f8693c9f872": {
     "triggered": "2026-07-24T05:49:54.115295+00:00",
